@@ -1,0 +1,392 @@
+
+Continue after actually running the main script. This is ment to be an extension to that. 
+
+```{r OTU Significance - Female}
+## Kruskal - Wallis test to check for generally significant OTUs ##
+OTU_Female <- bCT_Metadata %>%
+  select(Sample, Gender) %>% 
+  inner_join(OTU_long, by = "Sample") %>% 
+  filter(Gender == "F")
+
+## Normal WIlcoxon, paired. Save the significant OTU for each group pair ##
+OTU_tests_F <- OTU_Female %>% 
+  filter(Group == "PB01" | Group == "PB12") %>% 
+  mutate(Sample = substr(Sample, 2, 3)) %>% 
+  group_by(OTU) %>% 
+  nest() %>% 
+  mutate(Wilcox = map(.x = data, ~ wilcox.test(
+      x = .x$Abundance[.x$Group == "PB01"],
+      y = .x$Abundance[.x$Group == "PB12"],
+      paired = TRUE, exact = TRUE) %>%
+      tidy())) %>%
+  unnest() ## %>%
+  # select(Family, Group, p.value) 
+  
+OTU_tests_F <- OTU_Female %>%
+  filter(Group == "LC01" | Group == "LC12") %>% 
+  group_by(OTU) %>% 
+  nest() %>% 
+  mutate(Wilcox = map(.x = data, ~ wilcox.test(
+      x = .x$Abundance[.x$Group == "LC01"],
+      y = .x$Abundance[.x$Group == "LC12"],
+      paired = TRUE, exact = TRUE) %>%
+      tidy())) %>%
+  unnest() %>%
+  # select(Family, Group, p.value) %>%
+  bind_rows(., OTU_tests_F)
+
+## Visualise the p values ##
+Families_p_values_F <- OTU_tests_F %>%
+  ungroup() %>% 
+  mutate(Group = substr(Group, 1, 2)) %>% 
+  distinct() %>% 
+  ggplot(., aes(y = reorder(Family, Abundance), x = p.value, fill = Group)) +
+  geom_point(shape = 21, size = 2) +
+  scale_fill_manual(values = c("PB" = Pallete[5], "LC" = Pallete[2])) +
+  geom_vline(aes(xintercept = 0.05),
+             color = "black",
+             linetype = "dotted") +
+  scale_x_continuous() +
+  labs(y = "Family", x = "P value", title = "Paired Wilcoxon ~ P-Values ~ Females") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.text.y = element_markdown(size = 7, hjust = 1))
+```
+
+
+
+
+```{r OTU Significance - Male}
+## Kruskal - Wallis test to check for generally significant OTUs ##
+OTU_Male <- bCT_Metadata %>%
+  select(Sample, Gender) %>% 
+  inner_join(OTU_long, by = "Sample") %>% 
+  filter(Gender == "M")
+
+## Normal WIlcoxon, paired. Save the significant OTU for each group pair ##
+OTU_tests_M <- OTU_Male %>% 
+  filter(Group == "PB01" | Group == "PB12") %>% 
+  mutate(Sample = substr(Sample, 2, 3)) %>% 
+  group_by(OTU) %>% 
+  nest() %>% 
+  mutate(Wilcox = map(.x = data, ~ wilcox.test(
+      x = .x$Abundance[.x$Group == "PB01"],
+      y = .x$Abundance[.x$Group == "PB12"],
+      paired = TRUE, exact = TRUE) %>%
+      tidy())) %>%
+  unnest() ## %>%
+  # select(Family, Group, p.value) 
+  
+OTU_tests_M <- OTU_Male %>%
+  filter(Group == "LC01" | Group == "LC12") %>% 
+  group_by(OTU) %>% 
+  nest() %>% 
+  mutate(Wilcox = map(.x = data, ~ wilcox.test(
+      x = .x$Abundance[.x$Group == "LC01"],
+      y = .x$Abundance[.x$Group == "LC12"],
+      paired = TRUE, exact = TRUE) %>%
+      tidy())) %>%
+  unnest() %>%
+  # select(Family, Group, p.value) %>%
+  bind_rows(., OTU_tests_M)
+
+## Visualise the p values ##
+Families_p_values_M <- OTU_tests_M %>%
+  ungroup() %>% 
+  mutate(Group = substr(Group, 1, 2)) %>% 
+  distinct() %>% 
+  ggplot(., aes(y = reorder(Family, Abundance), x = p.value, fill = Group)) +
+  geom_point(shape = 21, size = 2) +
+  scale_fill_manual(values = c("PB" = Pallete[5], "LC" = Pallete[2])) +
+  geom_vline(aes(xintercept = 0.05),
+             color = "black",
+             linetype = "dotted") +
+  scale_x_continuous() +
+  labs(y = "Family", x = "P value", title = "Paired Wilcoxon ~ P-Values ~ Males") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.text.y = element_markdown(size = 7, hjust = 1))
+```
+
+
+```{r Gendered Alpha Significance }
+## Perform the t tests ##
+## In case you want to also make tests for each gender, add two lines in the filter ##
+## section of each command and alter the preexisting ones to cover the genders. ##
+Metadata_Indexes_F <- bCT_Metadata %>%
+  select(Sample, Gender) %>% 
+  inner_join(Metadata_Indexes, by = "Sample") %>% 
+  filter(Gender == "F") %>% 
+  select(-Gender)
+
+Pairwise_Index_t_F <- Metadata_Indexes_F %>%
+  nest() %>%
+  mutate(t_test = map(.x = data, ~ pairwise.t.test(
+      x = .x$Shannon, g = .x$Group, p.adjust.method = "none") %>% 
+        tidy())) %>% 
+  unnest(t_test) %>% 
+  filter((group1 == "LC12" & group2 == "LC01") |
+         (group1 == "PB12" & group2 == "PB01")) %>% 
+  mutate(Shannon_p = p.value) %>% 
+  select(-p.value, -data)
+
+Pairwise_Index_t_F$Simpson_p <- Metadata_Indexes_F %>%
+  nest() %>%
+  mutate(t_test = map(.x = data, ~ pairwise.t.test(
+    x = .x$Simpson, g = .x$Group, p.adjust.method = "none") %>% 
+      tidy())) %>% 
+  unnest(t_test) %>% 
+  filter((group1 == "LC12" & group2 == "LC01") |
+         (group1 == "PB12" & group2 == "PB01")) %>% 
+  mutate(Simpson_p = p.value) %>% 
+  pull(Simpson_p)
+
+Pairwise_Index_t_F$Inv_Simpson_p <- Metadata_Indexes_F %>%
+  nest() %>%
+  mutate(t_test = map(.x = data, ~ pairwise.t.test(
+    x = .x$Inverse_Simpson, g = .x$Group, p.adjust.method = "none") %>% 
+      tidy())) %>% 
+  unnest(t_test) %>% 
+  filter((group1 == "LC12" & group2 == "LC01") |
+         (group1 == "PB12" & group2 == "PB01")) %>% 
+  mutate(Inv_Simpson_p = p.value) %>% 
+  pull(Inv_Simpson_p)
+
+Pairwise_Index_t_F$Pielou_p <- Metadata_Indexes_F %>%
+  nest() %>%
+  mutate(t_test = map(.x = data, ~ pairwise.t.test(
+    x = .x$Pielou, g = .x$Group, p.adjust.method = "none") %>% 
+      tidy())) %>% 
+  unnest(t_test) %>% 
+  filter((group1 == "LC12" & group2 == "LC01") |
+         (group1 == "PB12" & group2 == "PB01")) %>% 
+  mutate(Pielou_p = p.value) %>% 
+  pull(Pielou_p)
+```
+
+```{r Gendered Alpha Significance }
+## Perform the t tests ##
+## In case you want to also make tests for each gender, add two lines in the filter ##
+## section of each command and alter the preexisting ones to cover the genders. ##
+Metadata_Indexes_M <- bCT_Metadata %>%
+  select(Sample, Gender) %>% 
+  inner_join(Metadata_Indexes, by = "Sample") %>% 
+  filter(Gender == "M") %>% 
+  select(-Gender)
+
+Pairwise_Index_t_M <- Metadata_Indexes_M %>%
+  nest() %>%
+  mutate(t_test = map(.x = data, ~ pairwise.t.test(
+      x = .x$Shannon, g = .x$Group, p.adjust.method = "none") %>% 
+        tidy())) %>% 
+  unnest(t_test) %>% 
+  filter((group1 == "LC12" & group2 == "LC01") |
+         (group1 == "PB12" & group2 == "PB01")) %>% 
+  mutate(Shannon_p = p.value) %>% 
+  select(-p.value, -data)
+
+Pairwise_Index_t_M$Simpson_p <- Metadata_Indexes_M %>%
+  nest() %>%
+  mutate(t_test = map(.x = data, ~ pairwise.t.test(
+    x = .x$Simpson, g = .x$Group, p.adjust.method = "none") %>% 
+      tidy())) %>% 
+  unnest(t_test) %>% 
+  filter((group1 == "LC12" & group2 == "LC01") |
+         (group1 == "PB12" & group2 == "PB01")) %>% 
+  mutate(Simpson_p = p.value) %>% 
+  pull(Simpson_p)
+
+Pairwise_Index_t_M$Inv_Simpson_p <- Metadata_Indexes_M %>%
+  nest() %>%
+  mutate(t_test = map(.x = data, ~ pairwise.t.test(
+    x = .x$Inverse_Simpson, g = .x$Group, p.adjust.method = "none") %>% 
+      tidy())) %>% 
+  unnest(t_test) %>% 
+  filter((group1 == "LC12" & group2 == "LC01") |
+         (group1 == "PB12" & group2 == "PB01")) %>% 
+  mutate(Inv_Simpson_p = p.value) %>% 
+  pull(Inv_Simpson_p)
+
+Pairwise_Index_t_M$Pielou_p <- Metadata_Indexes_M %>%
+  nest() %>%
+  mutate(t_test = map(.x = data, ~ pairwise.t.test(
+    x = .x$Pielou, g = .x$Group, p.adjust.method = "none") %>% 
+      tidy())) %>% 
+  unnest(t_test) %>% 
+  filter((group1 == "LC12" & group2 == "LC01") |
+         (group1 == "PB12" & group2 == "PB01")) %>% 
+  mutate(Pielou_p = p.value) %>% 
+  pull(Pielou_p)
+```
+
+
+
+
+Paired Wilcox tests for all groups. Check for significant differences between OTUs with the Kruskal Wallis test first and then pipe the ones with a P-value < 0.05 to the Wilcoxon test. In case you have multiple comparisons between multiple groups, change the test to a pairwise Wilcoxon using the supplementary code. Keep in mind that this will require a p-adjustment. 
+
+```{r OTU Significance ~ Phylum}
+## Kruskal - Wallis test to check for generally significant OTUs ##
+OTU_Phylum_long_F <- bCT_Metadata %>%
+  select(Sample, Gender) %>% 
+  inner_join(OTU_Phylum_long, by = "Sample") %>% 
+  filter(Gender == "F") %>% 
+  select(-Gender)
+
+OTU_Phylum_long_M <- bCT_Metadata %>%
+  select(Sample, Gender) %>% 
+  inner_join(OTU_Phylum_long, by = "Sample") %>% 
+  filter(Gender == "M") %>% 
+  select(-Gender)
+
+## Normal WIlcoxon, paired. Save the significant OTU for each group pair ~ Female ##
+Phyla_tests_F <- OTU_Phylum_long_F %>% 
+  filter(Group == "PB01" | Group == "PB12") %>% 
+  mutate(Sample = substr(Sample, 2, 3)) %>% 
+  group_by(Phylum) %>% 
+  nest() %>% 
+  mutate(Wilcox = map(.x = data, ~ wilcox.test(
+      x = .x$Abundance[.x$Group == "PB01"],
+      y = .x$Abundance[.x$Group == "PB12"],
+      paired = TRUE, exact = TRUE) %>%
+      tidy())) %>%
+  unnest()
+  
+Phyla_tests_F <- OTU_Phylum_long_F %>%
+  filter(Group == "LC01" | Group == "LC12") %>% 
+  group_by(Phylum) %>% 
+  nest() %>% 
+  mutate(Wilcox = map(.x = data, ~ wilcox.test(
+      x = .x$Abundance[.x$Group == "LC01"],
+      y = .x$Abundance[.x$Group == "LC12"],
+      paired = TRUE, exact = TRUE) %>%
+      tidy())) %>%
+  unnest() %>%
+  # select(Family, Group, p.value) %>%
+  bind_rows(., Phyla_tests_F)
+
+## Normal WIlcoxon, paired. Save the significant OTU for each group pair ~ Male ##
+Phyla_tests_M <- OTU_Phylum_long_M %>% 
+  filter(Group == "PB01" | Group == "PB12") %>% 
+  mutate(Sample = substr(Sample, 2, 3)) %>% 
+  group_by(Phylum) %>% 
+  nest() %>% 
+  mutate(Wilcox = map(.x = data, ~ wilcox.test(
+      x = .x$Abundance[.x$Group == "PB01"],
+      y = .x$Abundance[.x$Group == "PB12"],
+      paired = TRUE, exact = TRUE) %>%
+      tidy())) %>%
+  unnest()
+  
+Phyla_tests_M <- OTU_Phylum_long_M %>%
+  filter(Group == "LC01" | Group == "LC12") %>% 
+  group_by(Phylum) %>% 
+  nest() %>% 
+  mutate(Wilcox = map(.x = data, ~ wilcox.test(
+      x = .x$Abundance[.x$Group == "LC01"],
+      y = .x$Abundance[.x$Group == "LC12"],
+      paired = TRUE, exact = TRUE) %>%
+      tidy())) %>%
+  unnest() %>%
+  # select(Family, Group, p.value) %>%
+  bind_rows(., Phyla_tests_M)
+
+## Visualise the p values ##
+Phyla_p_values_F <- Phyla_tests_F %>%
+  ungroup() %>%
+  mutate(Group = substr(.$Group, 1, 2)) %>%
+  ggplot(., aes(y = reorder(Phylum, Abundance), x = p.value, fill = Group)) +
+  geom_point(shape = 21, size = 2) +
+  scale_fill_manual(values = c("PB" = Pallete[5], "LC" = Pallete[2])) +
+  geom_vline(aes(xintercept = 0.05),
+             color = "black",
+             linetype = "dotted") +
+  scale_x_continuous() +
+  labs(y = "Phylum", x = "P value", title = "Paired Wilcoxon ~ P-Values ~ Females") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.text.y = element_markdown(size = 7, hjust = 1))
+
+Phyla_p_values_M <- Phyla_tests_M %>%
+  ungroup() %>%
+  mutate(Group = substr(.$Group, 1, 2)) %>%
+  ggplot(., aes(y = reorder(Phylum, Abundance), x = p.value, fill = Group)) +
+  geom_point(shape = 21, size = 2) +
+  scale_fill_manual(values = c("PB" = Pallete[5], "LC" = Pallete[2])) +
+  geom_vline(aes(xintercept = 0.05),
+             color = "black",
+             linetype = "dotted") +
+  scale_x_continuous() +
+  labs(y = "Phylum", x = "P value", title = "Paired Wilcoxon ~ P-Values ~ Males") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.text.y = element_markdown(size = 7, hjust = 1))
+
+```
+
+```{r}
+## Alpha Significance ##
+Pairwise_Index_t_F
+Pairwise_Index_t_M
+## Families - Significance ##
+Families_p_values_F
+Families_p_values_M
+## Phyla - Significance ##
+Phyla_p_values_F
+Phyla_p_values_M
+
+# ggsave("Plottin_2/Gendered/Families_p_values_F.png", plot = Families_p_values_F, width = 12, height = 8, dpi = 600)
+# ggsave("Plottin_2/Gendered/Families_p_values_M.png", plot = Families_p_values_M, width = 12, height = 8, dpi = 600)
+# ggsave("Plottin_2/Gendered/Phyla_p_values_F.png", plot = Phyla_p_values_F, width = 12, height = 8, dpi = 600)
+# ggsave("Plottin_2/Gendered/Phyla_p_values_M.png", plot = Phyla_p_values_M, width = 12, height = 8, dpi = 600)
+```
+
+
+
+```{r Alpha diversity plots}
+## Indexes - Barplots
+Alpha_Div_Barplots_Gendered <- Metadata_Indexes %>%
+  mutate(Gender = bCT_Metadata$Gender) %>%
+  pivot_longer(cols = -c(Sample, Group, Gender), names_to = "Index", values_to = "Value") %>% 
+  inner_join(Index_Stats, by = c("Group", "Index")) %>% 
+  filter(!Gender == "U") %>%
+  ggplot(., aes(x = Group, y = Value, fill = Group)) + 
+  geom_col(data = Index_Stats, aes(x = Group, y = Median, fill = Group), 
+           position = position_dodge(width = 0.75), width = 0.6, alpha = 0.8) +
+  scale_fill_manual(values = color_palette_function(length(unique(Metadata_Indexes$Group)))) +  
+  # geom_boxplot(alpha = 0.8) + 
+  geom_jitter(width = 0, alpha = 0.3, colour = "midnightblue") +
+  ggh4x::facet_grid2(Gender ~ Index, scales = "free", independent = "y") + 
+  theme(plot.title = element_text(hjust = 0.5),
+        panel.background = element_rect(fill = "grey75"),
+        axis.title.x = element_blank(), axis.text.x = element_text(size = 8, angle = 45, hjust = 1)) + 
+  ggtitle("Alpha Diversity Indexes ~ Divided by Gender") + 
+  guides(fill = guide_legend(ncol = 1)) +
+  labs(fill = "Group") + 
+  stat_compare_means(method = "t.test", paired = TRUE, label = "p.signif",
+                     comparisons = list( c("PB01", "PB12"), c("LC01", "LC12"))) +
+  geom_errorbar(aes(ymin = Min, ymax = Max), width = 0.2)
+
+
+## Indexes - Boxplots
+Alpha_Div_Boxplots_Gendered <- Metadata_Indexes %>%
+  mutate(Gender = bCT_Metadata$Gender) %>% 
+  pivot_longer(cols = -c(Sample, Group, Gender), names_to = "Index", values_to = "Value") %>% 
+  filter(!Gender == "U") %>%
+  ggplot(., aes(x = Group, y = Value, fill = Group)) + 
+    geom_boxplot(alpha = 0.8) + geom_jitter(width = 0, alpha = 0.6, colour = "mediumblue") +
+    scale_fill_manual(values = color_palette_function(length(unique(Metadata_Indexes$Group)))) +  
+    ggh4x::facet_grid2(Gender ~ Index, scales = "free", independent = "y") + 
+    theme(plot.title = element_text(hjust = 0.5),
+          panel.background = element_rect(fill = "grey75"),
+          axis.title.x = element_blank(), axis.text.x = element_text(size = 8, angle = 45, hjust = 1)) + 
+    ggtitle("Alpha Diversity Indexes") + 
+    guides(fill = guide_legend(ncol = 1)) +
+    labs(fill = "Group") + 
+  stat_compare_means(method = "t.test", paired = TRUE, label = "p.signif",
+                     comparisons = list( c("PB01", "PB12"), c("LC01", "LC12")))
+
+# ggsave("Plottin_2/Gendered/Alpha_Div_Barplots_Gendered.png", plot = Alpha_Div_Barplots_Gendered, width = 12, height = 8, dpi = 600)
+# ggsave("Plottin_2/Gendered/Alpha_Div_Boxplots_Gendered.png", plot = Alpha_Div_Boxplots_Gendered, width = 12, height = 8, dpi = 600)
+
+```
+

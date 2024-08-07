@@ -1,0 +1,688 @@
+
+
+
+```{r OTU Means}
+## Create a dataframe for the mean relative abundance per Group for each Family and Phylum, and make the data markdown ready ##
+OTU_Mean_Rel <- OTU_table_t %>%
+  group_by(Group) %>%
+  summarise_at(vars(starts_with("OTU")), ~ mean(.x, na.rm = TRUE)) %>% 
+  rowwise() %>% 
+  mutate(across(where(is.numeric), ~ (.x / sum(c_across(where(is.numeric))) * 100))) %>% 
+  pivot_longer(cols = -Group, names_to = "OTU", values_to = "Rel_Mean_Abundance") %>% 
+  add_column(Family = TAX_table$Family[match(.$OTU, TAX_table$OTU)], .after = 2) %>% 
+  add_column(Phylum = TAX_table$Phylum[match(.$OTU, TAX_table$OTU)], .after = 2) %>% 
+  mutate(Family = str_replace_all(Family, "^(.*)$", "*\\1*"),
+         Family = str_replace(Family, "(.*)_unclassified\\*$", "Unclassified \\1*"),
+         Family = str_replace_all(Family, "^(\\S)$", "*\\1*"), 
+         Phylum = str_replace_all(Phylum, "^(.*)$", "*\\1*")) 
+
+## Pool the families with a mean relative abundance less than 1% (Or whatever percentage) to the "Other" family ##
+OTU_Mean_Rel <- OTU_Mean_Rel %>%
+  group_by(Family) %>%
+  summarise(Pool = max(Rel_Mean_Abundance) < 1, .groups = "drop") %>%
+  inner_join(OTU_Mean_Rel, ., by = "Family") %>%
+  mutate(Family_Pooled = if_else(Pool, "Other", Family), .after = Family) %>%
+  group_by(Group, Family)
+
+```
+
+```{r RA Plots - Unordered}
+## Family RA per Sample, Descending Enterobacteria order##
+OTU_long %>%
+  ggplot(., aes(x = Sample, y = Abundance, fill =  reorder(Family_Pooled, Abundance))) +
+  geom_bar(stat = "identity", width = 1) +
+  scale_fill_manual(values = color_palette_function(length(unique(OTU_long$Family_Pooled)))) +  
+  ggtitle("Relative Family Abundance per Sample - Grouped") + 
+  theme(legend.key.size = unit(0.4, "cm"), 
+        plot.title = element_text(hjust = 0.5), 
+        axis.text.x = element_text(size = 6, angle = 45, hjust = 1), , 
+        legend.text = element_markdown()) + 
+  guides(fill = guide_legend(ncol = 1)) +
+  labs(fill = "Family") +
+  facet_wrap(~Group, nrow = 1, scales = "free_x") +
+  ylab("Relative Abundance")
+```
+
+
+```{r F2B t test}
+## Create a code for each sample and filter for each Group pair to perform a paired t test ##
+PB_ratio_test <- F2B %>%
+  filter(Group == "PB01" | Group == "PB12") %>% 
+  ungroup() %>% 
+  mutate(Sample_ID = substr(Sample, start = 2, stop = 3)) %>% 
+  select(Sample_ID, Group, Ratio) %>% 
+  pivot_wider(names_from = Group, values_from = Ratio) %>% 
+  # na.omit() %>%  
+  {t.test(.$PB01, .$PB12, paired = TRUE)}
+
+LC_ratio_test <- F2B %>%
+  filter(Group == "LC01" | Group == "LC12") %>% 
+  ungroup() %>% 
+  mutate(Sample_ID = substr(Sample, start = 2, stop = 3)) %>% 
+  select(Sample_ID, Group, Ratio) %>% 
+  pivot_wider(names_from = Group, values_from = Ratio) %>% 
+  # na.omit() %>%  
+  {t.test(.$LC01, .$LC12, paired = TRUE)}
+
+## Combine the resultsfrom the t test to a single dataframe for readability ##
+Ratio_t_tests <- data.frame(
+  Test = c("PB_ratio_test", "LC_ratio_test"),
+  Statistic = c(PB_ratio_test$statistic, LC_ratio_test$statistic),
+  Parameter = c(PB_ratio_test$parameter, LC_ratio_test$parameter),
+  P.Value = c(PB_ratio_test$p.value, LC_ratio_test$p.value),
+  Confidence.Interval = c(paste(PB_ratio_test$conf.int[1], PB_ratio_test$conf.int[2]), 
+                          paste(LC_ratio_test$conf.int[1], LC_ratio_test$conf.int[2])))
+```
+
+```{r}
+## Plot the indexes ##
+Alpha_Div_Barplots <- ggplot(Index_Stats, aes(x = Group, y = Median, fill = Group)) + 
+  geom_col() +
+  geom_errorbar(aes(ymin = Median - SE, ymax = Median + SE), width = 0.2) + # Add this line
+  scale_fill_manual(values = c(Pallete[1], Pallete[2], Pallete[4], Pallete[5])) +  
+  facet_wrap(~Index, scales = "free_y", nrow = 1) +
+  theme(legend.text = element_text(size = 8), # Smaller text
+        legend.position = "right", plot.title = element_text(hjust = 0.5),
+        panel.background = element_rect(fill = "grey75"),
+        axis.title.x = element_blank(), axis.text.x = element_text(size = 8, angle = 45, hjust = 1)) + 
+  ggtitle("Alpha Diversity Indexes") + 
+  guides(fill = guide_legend(ncol = 1)) +
+  labs(fill = "Group") +
+  ylab("Index Values") 
+
+Alpha_Div_Barplots_NS <- Alpha_Div_Barplots +
+  geom_signif(
+    y_position = c(4.7, 4.7),
+    data = Index_Stats,
+    stat = "signif",
+    position = "identity",
+    comparisons = list(c("PB01", "PB12","LC01", "LC12"), c("PB01", "PB12","LC01", "LC12"), c("PB01", "PB12","LC01", "LC12"), 
+                       c("PB01", "PB12","LC01", "LC12")),
+    map_signif_level = TRUE,
+    annotations = "NS",
+    textsize = 1.8)
+```
+
+
+
+
+
+```{r}
+## For the sake of my thesis i am choosing to ignore the statistics above and willjust carry on with the wilcoxon test ##
+Pairwise_Wilcox_OTUs <- OTU_long %>% 
+  group_by(OTU) %>% 
+  nest() %>% 
+  mutate(Pairwise_Wilcox = map(.x = data, ~pairwise.wilcox.test(
+    x = .x$Abundance, 
+    g = .x$Group, 
+    p.adjust.method = "none") %>% 
+                       tidy())) %>% 
+  unnest(Pairwise_Wilcox) %>% 
+  filter(p.value < 0.05) %>%
+  filter(group1 == "PB12" & group2 == "PB01" | group1 == "LC12" & group2 == "LC01" )
+```
+
+Alternative significance checking
+```{r Alternative testing, pairwise wilcoxon}
+## Prep the two separate dfs to compare the OTU counts per group ##
+## Order by Sample_ID so the paired samples will be checked instead of random ones ##
+LC_OTU_test <- OTU_long %>%
+  filter(Group == "LC01" | Group == "LC12") %>%
+  ungroup() %>%
+  mutate(Sample_ID = substr(Sample, start = 2, stop = 3)) %>%
+  select(Sample_ID, Group, Family, Abundance) %>%
+  arrange(., Sample_ID)
+# %>%
+# pivot_wider(names_from = Group, values_from = Abundance)
+
+PB_OTU_test <- OTU_long %>%
+  filter(Group == "PB01" | Group == "PB12") %>%
+  ungroup() %>%
+  mutate(Sample_ID = substr(Sample, start = 2, stop = 3)) %>%
+  select(Sample_ID, Group, Family, Abundance) %>%
+  arrange(., Sample_ID)
+# %>%
+# pivot_wider(names_from = Group, values_from = Abundance)
+
+## Pairwise Wilcoxon Tests ##
+## Probiotic ##
+LC_OTU_test %>%
+  group_by(Family) %>%
+  nest() %>%
+  mutate(Pairwise_Wilcox = map(.x = data, ~ pairwise.wilcox.test(
+      x = .x$Abundance,
+      g = .x$Group,
+      p.adjust.method = "none") %>%
+      tidy())) %>%
+  unnest(Pairwise_Wilcox) %>% 
+  filter(p.value < 0.05)
+
+## Placebo ##
+PB_OTU_test %>%
+  group_by(Family) %>%
+  nest() %>%
+  mutate(Pairwise_Wilcox = map(.x = data, ~ pairwise.wilcox.test(
+      x = .x$Abundance,
+      g = .x$Group,
+      p.adjust.method = "none") %>%
+      tidy())) %>%
+  unnest(Pairwise_Wilcox) %>% 
+  filter(p.value < 0.05)
+```
+
+```{r}
+Significant_OTUs_LC %>%
+  group_by(OTU) %>% 
+  nest() %>% 
+  mutate(Wilcox = map(.x = data, ~ wilcox.test(
+      x = .x$Abundance[.x$Group == "LC01"],
+      y = .x$Abundance[.x$Group == "LC12"],
+      paired = TRUE, exact = TRUE) %>%
+      tidy())) %>%
+  unnest(Wilcox) %>%
+  filter(p.value < 0.05)
+
+Significant_OTUs_PB %>%
+  group_by(OTU) %>% 
+  nest() %>% 
+  mutate(Wilcox = map(.x = data, ~ wilcox.test(
+      x = .x$Abundance[.x$Group == "PB01"],
+      y = .x$Abundance[.x$Group == "PB12"],
+      paired = TRUE, exact = TRUE) %>%
+      tidy())) %>%
+  unnest(Wilcox) %>%
+  filter(p.value < 0.05)
+
+```
+
+```{r}
+## Normal WIlcoxon, paired ##
+Significant_OTUs_LC <- OTU_long %>% 
+  filter(Group == "LC01" | Group == "LC12") %>%
+  group_by(OTU) %>% 
+  nest() %>% 
+  mutate(Kruskal_OTUs = map(.x = data, ~kruskal.test(Abundance ~ Group, data = .x) %>% 
+      tidy())) %>% 
+  unnest(Kruskal_OTUs) %>% 
+  ungroup() %>% 
+  mutate(p_checked = p.adjust(p.value, method = "none")) %>% 
+  filter(p_checked < 0.05) %>% 
+  select(OTU, data, p_checked)
+
+Significant_OTUs_LC %>%
+  mutate(Wilcox = map(.x = data, ~ wilcox.test(
+      x = .x$Abundance[.x$Group == "LC01"],
+      y = .x$Abundance[.x$Group == "LC12"],
+      paired = TRUE, exact = TRUE) %>%
+      tidy())) %>%
+  unnest(Wilcox) %>%
+  filter(p.value < 0.05)
+
+## Order by Sample_ID so the paired samples will be checked instead of random ones ##
+LC_OTU_test <- OTU_long %>%
+  filter(Group == "LC01" | Group == "LC12") %>%
+  ungroup() %>%
+  mutate(Sample_ID = substr(Sample, start = 2, stop = 3)) %>%
+  select(Sample_ID, Group, Family, Abundance) %>%
+  arrange(., Sample_ID)
+# %>%
+# pivot_wider(names_from = Group, values_from = Abundance)
+
+PB_OTU_test <- OTU_long %>%
+  filter(Group == "PB01" | Group == "PB12") %>%
+  ungroup() %>%
+  mutate(Sample_ID = substr(Sample, start = 2, stop = 3)) %>%
+  select(Sample_ID, Group, Family, Abundance) %>%
+  arrange(., Sample_ID)
+# %>%
+# pivot_wider(names_from = Group, values_from = Abundance)
+
+## Probiotic ##
+OTU_tests <- LC_OTU_test %>%
+  group_by(Family) %>%
+  nest() %>%
+  mutate(Wilcox = map(.x = data, ~ wilcox.test(
+      x = .x$Abundance[.x$Group == "LC01"],
+      y = .x$Abundance[.x$Group == "LC12"],
+      paired = TRUE, exact = TRUE) %>%
+      tidy())) %>%
+  unnest() %>%
+  select(Family, Group, p.value)
+
+## Placebo ##
+OTU_tests <- PB_OTU_test %>%
+  group_by(Family) %>%
+  nest() %>%
+  mutate(Wilcox = map(.x = data, ~ wilcox.test(
+      x = .x$Abundance[.x$Group == "PB01"],
+      y = .x$Abundance[.x$Group == "PB12"],
+      paired = TRUE, exact = TRUE) %>%
+      tidy())) %>%
+  unnest() %>%
+  select(Family, Group, p.value) %>%
+  bind_rows(., OTU_tests)
+
+## Visualise the p values ##
+OTU_tests %>%
+  ungroup() %>%
+  mutate(Group = substr(.$Group, 1, 2)) %>%
+  ggplot(., aes(y = reorder(Family, -p.value), x = p.value, fill = Group)) +
+  geom_point(shape = 21, size = 2) +
+  scale_fill_manual(values = c("PB" = Pallete[5], "LC" = Pallete[2])) +
+  geom_vline(aes(xintercept = 0.05),
+             color = "black",
+             linetype = "dotted") +
+  scale_x_continuous(breaks = c(0, 0.25, 0.50, 0.75, 1)) +
+  labs(y = "Family", x = "P-values", title = "Paired Wilcoxon Test Scatterplot") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.text.y = element_markdown(size = 7, hjust = 1))
+
+OTU_tests %>% 
+  filter(p.value < 0.05) %>% 
+  group_by(Family)
+
+## For the significant families rel abundance ##
+matched_df %>% 
+  ungroup() %>%
+  mutate(Abundance = Abundance + 1/20000) %>% 
+  # filter(!Family_Pooled == "Other") %>% 
+  # mutate(Family_Pooled = factor(Family_Pooled), 
+  #        Family_Pooled = fct_reorder(Family_Pooled, Abundance, .desc = TRUE), 
+  #        Family_Pooled = fct_shift(Family_Pooled, n = 1)) %>% 
+  ggplot(., aes(x = Abundance, y = Family, color = Group, fill = Group)) + 
+  geom_jitter(position = position_jitterdodge(dodge.width = 1, 
+                                              jitter.width = 0.1), shape = 21) +
+  scale_color_manual(values = color_palette_function(length(unique(OTU_long$Group)))) +
+  scale_fill_manual(values = color_palette_function(length(unique(OTU_long$Group)))) +
+  stat_summary(fun.data = median_hilow, 
+               fun.args = list(conf.int = 0.5), 
+               geom = "pointrange", 
+               position = position_dodge(width = 1), 
+               colour = "black", 
+               show.legend = FALSE) +
+  theme(panel.background = element_rect(fill = "gray75"),
+        axis.text.y = element_markdown(), 
+        axis.title.y = element_blank(), 
+        plot.title = element_text(hjust = 0.5), 
+        strip.text = element_blank()) +
+  ggtitle("Relative abundance of significant families, log scale") +
+  scale_x_log10() +
+  facet_wrap(~Group_alt, nrow = 2, scales = "free_y")
+```
+
+
+```{r OTU Significance Checking}
+## KS Test ##
+Significant_OTUs <- OTU_long %>% 
+  group_by(OTU) %>% 
+  nest() %>% 
+  mutate(Kruskal_OTUs = map(.x = data, ~kruskal.test(Abundance ~ Group, data = .x) %>% 
+      tidy())) %>% 
+  unnest(Kruskal_OTUs) %>% 
+  ungroup() %>% 
+  mutate(p_checked = p.adjust(p.value, method = "none")) %>% 
+  filter(p_checked < 0.05) %>% 
+  select(OTU, data, p_checked)
+
+## If the above df is empty, tough luck. Maybe next time there will be some significance, other wise pipe it to the next part ##
+Significant_OTUs %>%
+  mutate(Pairwise_Wilcox = map(.x = data, ~pairwise.wilcox.test(
+    x = .x$Abundance,
+    g = .x$Group,
+    p.adjust.method = "none") %>%
+      tidy())) %>%
+  unnest(Pairwise_Wilcox) %>%
+  filter(p.value < 0.05) %>%
+  filter(group1 == "PB12" & group2 == "PB01" | group1 == "LC12" & group2 == "LC01" )
+
+## This code should be used with the Families who showed statistical significance ##
+## instead of the families that are over the 3% threshold. In case you have statistical significant OTUs, ##
+## subset them and pipe the subdf to the ggplot function. If the abundance data is relative ##
+## but not up to 100, just add a "*100" before the "+ 1/20000", in the mutate function ##
+OTU_long %>% 
+  mutate(Abundance = Abundance + 1/20000) %>% 
+  filter(!Family_Pooled == "Other") %>% 
+  mutate(Family_Pooled = factor(Family_Pooled), 
+         Family_Pooled = fct_reorder(Family_Pooled, Abundance, .desc = TRUE), 
+         Family_Pooled = fct_shift(Family_Pooled, n = 1)) %>% 
+  ggplot(., aes(x = Abundance, y = Family_Pooled, color = Group, fill = Group)) + 
+  geom_jitter(position = position_jitterdodge(dodge.width = 1, 
+                                              jitter.width = 0.1), shape = 21) +
+  scale_color_manual(values = color_palette_function(length(unique(OTU_long$Group)))) +
+  scale_fill_manual(values = color_palette_function(length(unique(OTU_long$Group)))) +
+  stat_summary(fun.data = median_hilow, 
+               fun.args = list(conf.int = 0.5), 
+               geom = "pointrange", 
+               position = position_dodge(width = 1), 
+               colour = "black", 
+               show.legend = FALSE) +
+  theme(panel.background = element_rect(fill = "gray75"),
+        axis.text.y = element_markdown(), 
+        axis.title.y = element_blank(), 
+        plot.title = element_text(hjust = 0.5), 
+        strip.text = element_blank()) +
+  ggtitle("Relative abundance of significant families, log scale") +
+  scale_x_log10() +
+  facet_wrap(~Family_Pooled, ncol = 1, scales = "free_y")
+```
+
+
+Check for Correlation between OTUs
+```{r Association Matrix - OTUs}
+# OTU_Stats <- bCT_Metadata %>% 
+#   mutate(Sample = as.character(Sample)) %>% 
+#   select(Sample, Gender, Weight, Height, BMI) %>% 
+#   inner_join(OTU_table_t, by = "Sample") %>% 
+#   # select(-Group) %>% 
+#   # inner_join(OTU_table_t, by = "Sample") %>% 
+#   select(Sample, Group, Gender, everything()) 
+  
+OTU_Stats <- OTU_table_t
+OTU_Stats_numeric <- OTU_Stats[sapply(OTU_Stats, is.numeric)] %>%
+  select(OTU_Order$OTU)
+
+## Check for normality ##
+OTU_Stats[sapply(OTU_Stats, is.numeric)] %>% 
+  apply(., 2, shapiro.test) %>% 
+  map_dbl("p.value") 
+
+## Calculate the correlations, remove the duplicate comparisons to create a triangular plot and convert the matrix to a dataframe for easier visualisation ##
+OTU_Stats_Correlation_Spearman <- cor(OTU_Stats_numeric, method = "spearman")
+OTU_Stats_Correlation_Spearman[upper.tri(OTU_Stats_Correlation_Spearman)] <- NA
+OTU_Stats_Correlation_Spearman <- melt(OTU_Stats_Correlation_Spearman)
+
+OTU_Stats_Correlation_Kendall <- cor(OTU_Stats_numeric, method = "kendall")
+OTU_Stats_Correlation_Kendall[upper.tri(OTU_Stats_Correlation_Kendall)] <- NA
+OTU_Stats_Correlation_Kendall <- melt(OTU_Stats_Correlation_Kendall)
+
+## Visualize the matrices ##
+OTU_Stats_Correlation_Spearman %>%
+  mutate(Var1 = OTU_Median_Rel$Family[match(.$Var1, OTU_Median_Rel$OTU)], Var1) %>% 
+  mutate(Var2 = OTU_Median_Rel$Family[match(.$Var2, OTU_Median_Rel$OTU)], Var2) %>% 
+  mutate(Var1 = factor(Var1, levels = OTU_Order$Family)) %>%
+  mutate(Var2 = factor(Var2, levels = OTU_Order$Family)) %>%
+  arrange(Var2) %>% 
+  ggplot(data = ., aes(x = Var1, y = Var2, fill = value)) + 
+  geom_tile() +
+  scale_fill_gradient2(low = "deeppink", high = "mediumspringgreen", mid = "dodgerblue3", 
+                       midpoint = 0, limit = c(-1,1), space = "Lab", 
+                       name="Correlation", na.value = "white") +
+  theme_minimal() + 
+  ggtitle("Spearman Correlation Matrix") +
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.text.x = element_markdown(angle = 55, hjust = 1, vjust = 1, size = 7),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.y = element_markdown(size = 7)) +
+  coord_fixed()
+
+OTU_Stats_Correlation_Kendall %>% 
+  mutate(Var1 = OTU_Median_Rel$Family[match(.$Var1, OTU_Median_Rel$OTU)], Var1) %>% 
+  mutate(Var2 = OTU_Median_Rel$Family[match(.$Var2, OTU_Median_Rel$OTU)], Var2) %>% 
+  mutate(Var1 = factor(Var1, levels = OTU_Order$Family)) %>%
+  mutate(Var2 = factor(Var2, levels = OTU_Order$Family)) %>%
+  arrange(Var2) %>% 
+  ggplot(data = ., aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "deeppink", high = "mediumspringgreen", mid = "dodgerblue3",
+                       midpoint = 0, limit = c(-1,1), space = "Lab",
+                       name="Correlation", na.value = "white") +
+  theme_minimal() +
+  ggtitle("Kendall Correlation Matrix") +
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.text.x = element_markdown(angle = 55, hjust = 1, vjust = 1, size = 7),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.y = element_markdown(size = 7)) +
+  coord_fixed()
+```
+
+
+Linear Models betweem the high Correlation OTUs
+```{r Linear Model - OTUs}
+# OTU_Stats_numeric <- OTU_Stats_numeric %>% 
+#   select(-c(Weight, Height, BMI))
+#   
+# OTU_Stats_cols <- OTU_Stats_cols[-(1:3)]
+
+OTU_Stats_numeric <- OTU_table_t[sapply(OTU_table_t, is.numeric)]
+
+OTU_Stats_cols <- OTU_table_t[sapply(OTU_table_t, is.numeric)] %>%
+  colnames(.)
+
+OTU_Stats_lm <- list()
+OTU_Stats_lm_plots <- list()
+OTU_lm_plots_neg <- list()
+OTU_lm_plots_pos <- list()
+
+for(i in seq_along(OTU_Stats_cols)) {     ## Check every variable in the OTU df ##
+  for(j in seq_along(OTU_Stats_cols)) {
+    if(i != j) {                      ## Skip checks between the same columns ##
+      ## Create the linear model for each pair ##
+      model_log <- lm(OTU_Stats_numeric[[OTU_Stats_cols[i]]] ~ OTU_Stats_numeric[[OTU_Stats_cols[j]]]) 
+      ## Save the linear model in the same list you stored the correlations ## 
+      OTU_Stats_lm[[paste(OTU_Stats_cols[i], "vs", OTU_Stats_cols[j])]] <- model_log
+      
+      OTU_lm_plot <- ggplot(OTU_Stats_numeric, aes_string(x = OTU_Stats_cols[j], y = OTU_Stats_cols[i])) + 
+        geom_point() + 
+        geom_smooth(method = lm, se = FALSE, color = "red") +
+        labs(title = paste(OTU_Stats_cols[i], "vs", OTU_Stats_cols[j]))
+      
+      ## Save all the plots in a new list ## 
+      OTU_Stats_lm_plots[[paste(OTU_Stats_cols[i], "vs", OTU_Stats_cols[j])]] <- OTU_lm_plot
+    }
+  }
+}
+
+## Filter for the Comparisons with the highest correlation ##
+OTU_Pos_Corr_Comp <- OTU_Stats_Correlation_Spearman %>%
+  filter(value > 0.6 & value < 0.999) %>% 
+  mutate(value2 = round(value, 3)) %>% 
+  arrange(desc(value)) %>% 
+  distinct(value, .keep_all = TRUE) 
+
+## Visualise based on the high correlation comparisons ##
+for(i in 1:nrow(OTU_Pos_Corr_Comp)) {
+  plot_title <- paste(OTU_Pos_Corr_Comp$Var1[i], "vs", OTU_Pos_Corr_Comp$Var2[i])
+
+  corr_str_pos <- OTU_Pos_Corr_Comp$value2[i] %>% 
+    as.character() 
+  
+  plot <- OTU_Stats_lm_plots[[plot_title]] + 
+    labs(subtitle = paste("Correlation = ", corr_str_pos))
+  # print(plot)
+  
+  OTU_lm_plots_pos[[plot_title]] <- plot
+}
+
+## Filter for the Comparisons with the highest correlation ##
+OTU_Neg_Corr_Comp <- OTU_Stats_Correlation_Spearman %>%
+  mutate(value2 = round(value, 3)) %>% 
+  filter(value < -0.45) %>% 
+  arrange(desc(value)) %>% 
+  distinct(value, .keep_all = TRUE) 
+
+## Visualise based on the negative high correlation comparisons ##
+for(i in 1:nrow(OTU_Neg_Corr_Comp)) {
+  plot_title <- paste(OTU_Neg_Corr_Comp$Var1[i], "vs", OTU_Neg_Corr_Comp$Var2[i])
+  
+  corr_str_neg <- OTU_Neg_Corr_Comp$value2[i] %>% 
+    as.character()
+  
+  plot <- OTU_Stats_lm_plots[[plot_title]] + 
+    labs(subtitle = paste("Correlation = ", corr_str_neg))
+  # print(plot)
+  
+  OTU_lm_plots_neg[[plot_title]] <- plot
+}
+
+# ## This is to visualise them all together instead of by positive and by negative ##
+# OTU_Corr_Comp <- OTU_Stats_Correlation_Spearman_melted %>%
+#   filter(value < -0.45 | (value > 0.6 & value < 0.99)) %>% 
+#   arrange(desc(value)) %>% 
+#   distinct(value, .keep_all = TRUE)
+# 
+# ## Visualise based on the negative high correlation comparisons ##
+# for(i in 1:nrow(OTU_Corr_Comp)) {
+#   plot_title <- paste(OTU_Corr_Comp$Var1[i], "vs", OTU_Corr_Comp$Var2[i])
+#   print(OTU_Stats_lm_plots[[plot_title]])
+# }
+```
+```{r RDA - Split visualisation}
+sites_PB <- sites1 %>% 
+  filter(Group_alt == "PB")
+sites_LC <- sites1 %>% 
+  filter(Group_alt == "LC")
+
+centroids.Pop1_PB <- centroids.Pop1 %>% 
+  filter(Group == "PB01" | Group == "PB12")
+centroids.Pop1_LC <- centroids.Pop1 %>% 
+  filter(Group == "LC01" | Group == "LC12")
+
+# RDA_plot_PB <- 
+  ggplot() + 
+    geom_vline(xintercept = c(0), color = "grey70", linetype = 2) +
+    geom_hline(yintercept = c(0), color = "grey70", linetype = 2) +  
+    xlab(axis1[1, "label"]) +
+    ylab(axis1[2, "label"]) +  
+    scale_x_continuous(sec.axis = dup_axis(labels = NULL, name = NULL)) +
+    scale_y_continuous(sec.axis = dup_axis(labels = NULL, name = NULL)) +
+    geom_mark_hull(data = sites_PB, 
+                   aes(x = axis1, y = axis2, colour = Group, 
+                       fill = after_scale(alpha(colour, 0.2)),
+                       label = Group), 
+                   concavity = 3, size = 1, expand = unit(0.5, "mm"),
+                   show.legend = FALSE, con.cap = 0, label.fill = alpha(Pallete, alpha = 0), 
+                   con.size = 0.8, con.linetype = "dashed" ) +
+    # geom_segment(data = centroids.Pop2,
+    #              aes(x = axis1c, y = axis2c, xend = axis1, yend = axis2, colour = Group),
+    #              size = 0.4, show.legend = FALSE) +
+    geom_segment(data = vectors, aes(x = 0, y = 0, xend = CAP1, yend = CAP2), 
+                 arrow = arrow(length = unit(0.2, "cm")), colour = "black") +
+    geom_point(data = sites_PB, 
+               aes(x = axis1, y = axis2, colour = Group, shape = Gender), 
+               alpha = 0.7, size = 2) + 
+    geom_point(data = centroids.Pop1_PB, 
+               aes(x = axis1c, y = axis2c, colour = Group), 
+               size = 4, shape = 21, stroke = 1, colour = "black", fill = c(Pallete[4], Pallete[5])) + 
+  scale_colour_manual(values = c(Pallete[4], Pallete[5])) +
+  labs(title = "RDA or CCA Analysis using Bray Curtis distances from OTU abundancy data",
+        subtitle = "Comparisons made: Bodyweight Statistics and Alpha Diversity Indexes") +
+    ggrepel::geom_text_repel(data = vectors, aes(x = CAP1, y = CAP2, label = rownames(vectors)), vjust = 1, hjust = 0.5 ) 
+  
+# RDA_plot_LC <- 
+  ggplot() + 
+    geom_vline(xintercept = c(0), color = "grey70", linetype = 2) +
+    geom_hline(yintercept = c(0), color = "grey70", linetype = 2) +  
+    xlab(axis1[1, "label"]) +
+    ylab(axis1[2, "label"]) +  
+    scale_x_continuous(sec.axis = dup_axis(labels = NULL, name = NULL)) +
+    scale_y_continuous(sec.axis = dup_axis(labels = NULL, name = NULL)) +
+    geom_mark_hull(data = sites_LC, 
+                   aes(x = axis1, y = axis2, colour = Group, 
+                       fill = after_scale(alpha(colour, 0.2)),
+                       label = Group), 
+                   concavity = 3, size = 1, expand = unit(0.5, "mm"),
+                   show.legend = FALSE, con.cap = 0, label.fill = alpha(Pallete, alpha = 0), 
+                   con.size = 0.8, con.linetype = "dashed" ) +
+    # geom_segment(data = centroids.Pop2,
+    #              aes(x = axis1c, y = axis2c, xend = axis1, yend = axis2, colour = Group),
+    #              size = 0.4, show.legend = FALSE) +
+    geom_segment(data = vectors, aes(x = 0, y = 0, xend = CAP1, yend = CAP2), 
+                 arrow = arrow(length = unit(0.2, "cm")), colour = "black") +
+    geom_point(data = sites_LC, 
+               aes(x = axis1, y = axis2, colour = Group, shape = Gender), 
+               alpha = 0.7, size = 2) + 
+    geom_point(data = centroids.Pop1_LC, 
+               aes(x = axis1c, y = axis2c, colour = Group), 
+               size = 4, shape = 21, stroke = 1, colour = "black", fill = c(Pallete[1], Pallete[2])) + 
+  scale_colour_manual(values = c(Pallete[1], Pallete[2])) +
+  labs(title = "RDA or CCA Analysis using Bray Curtis distances from OTU abundancy data",
+        subtitle = "Comparisons made: Bodyweight Statistics and Alpha Diversity Indexes") +
+    ggrepel::geom_text_repel(data = vectors, aes(x = CAP1, y = CAP2, label = rownames(vectors)), vjust = 1, hjust = 0.5 ) 
+  
+```
+
+
+
+
+```{r Alternative Cor Checking}
+Stats_total <- bCT_Metadata %>% 
+  mutate(Sample = as.character(Sample)) %>% 
+  select(Sample, BMI) %>% 
+  inner_join(Metadata_Indexes[-Inverse_Simpson], by = "Sample") %>% 
+  inner_join(bCT_Biochemical, by = "Sample")
+
+Stats_numeric <- Stats_total[sapply(Stats_total, is.numeric)]
+
+## Check for normality ##
+Stats_total[sapply(Stats_total, is.numeric)] %>% 
+  apply(., 2, shapiro.test) %>% 
+  map_dbl("p.value") 
+
+## Calculate the correlations, remove the duplicate comparisons to create a triangular plot and convert the matrix to a dataframe for easier visualisation ##
+Stats_Correlation_Spearman <- cor(Stats_numeric, method = "spearman")
+Stats_Correlation_Spearman[upper.tri(Stats_Correlation_Spearman)] <- NA
+Stats_Correlation_Spearman <- melt(Stats_Correlation_Spearman)
+
+Stats_Correlation_Kendall <- cor(Stats_numeric, method = "kendall")
+Stats_Correlation_Kendall[upper.tri(Stats_Correlation_Kendall)] <- NA
+Stats_Correlation_Kendall <- melt(Stats_Correlation_Kendall)
+
+## Visualise the correlations ##
+ggplot(data = Stats_Correlation_Spearman, aes(x = Var1, y = Var2, fill = value)) + 
+  geom_tile() +
+  scale_fill_gradient2(low = "deeppink", high = "mediumspringgreen", mid = "dodgerblue3", 
+                       midpoint = 0, limit = c(-1,1), space = "Lab", 
+                       name="Correlation",
+                       na.value = "white") +
+  theme_minimal() + 
+  ggtitle("Spearman Correlation Matrix") +
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1), 
+        axis.title.x = element_blank(), 
+        axis.title.y = element_blank()) +
+  coord_fixed()
+
+ggplot(data = Stats_Correlation_Kendall, aes(x = Var1, y = Var2, fill = value)) + 
+  geom_tile() +
+  scale_fill_gradient2(low = "deeppink", high = "mediumspringgreen", mid = "dodgerblue3", 
+                       midpoint = 0, limit = c(-1,1), space = "Lab", 
+                       name="Correlation",
+                       na.value = "white") + 
+  theme_minimal() + 
+  ggtitle("Kendall Correlation Matrix") +
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1), 
+        axis.title.x = element_blank(), 
+        axis.title.y = element_blank()) +
+  coord_fixed()
+
+```
+
+
+
+
+
+```{r}
+    ggplot(F2B_stats$Stats_alt, aes(x = Group, y = Value, fill = Metric)) +
+    geom_col() +
+    coord_polar("y", start = 0) +
+    theme_classic() +
+    labs(title = "*Firmicutes* to *Bacteroidetes* ratio ~ Placebo Group", x = "", y = "") +
+    scale_fill_manual(values = c(Pallete[2], Pallete[4]), 
+                      labels = c("*Bacteroidetes*", "*Firmicutes*")) + 
+    theme(plot.title = element_markdown(hjust = 0.5), 
+          legend.title = element_blank(), 
+          legend.text = element_markdown()) +
+    ylim(0, 100)
+  
+
+
+  
+  
+
+```
+
+

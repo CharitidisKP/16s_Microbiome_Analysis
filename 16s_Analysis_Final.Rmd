@@ -1,0 +1,1726 @@
+This is an R-markdown file for microbiome 16s analysis. If you want to use this code you will have to change the path to fit your filenames and folders
+
+This is a block of code for you to load the libraries. If any library is not installed try to install it either with: install.packages("library") or with BiocManager::install("library"). Also set the seed to a specific value to generate the same "Random" values every first instance of the script running.
+
+```{r Libraries}
+## Donde esta la Bibliotecas ##
+library(tidyverse)
+library(purrr)
+library(broom)
+library(BiodiversityR)
+library(ggtext)
+library(ggsignif)
+library(pairwiseAdonis)
+library(reshape2)
+library(ggforce)
+# library(ggrepel)
+library(gridExtra)
+library(ggpubr)
+
+set.seed(151120)
+```
+
+Load the raw OTU table and Metadata file and create a Taxonomy file from the first column of the OTU table
+
+```{r Load and Separate}
+OTU_Unfiltered <- read_table("~/Duth/MRRN/Otu_Tables/16s_rRNA_analysis/bCT_Otu_Table_tax5.txt")
+
+bCT_Metadata_Unsorted <- read_csv("~/Duth/MRRN/Otu_Tables/16s_rRNA_analysis/bCT_Metadata_Unsorted.csv")
+
+## Save the totals but remove them from the table ##
+Root <- tail(OTU_Unfiltered, n = 1)
+OTU_Unfiltered <- head(OTU_Unfiltered, n = -1)
+
+## Seperate the taxonomy file from the OTU column in the tax_Merged_Table ##
+bCT_Taxonomy_Unfiltered <- OTU_Unfiltered %>%
+  select(OTU) %>%
+  distinct() %>%
+  separate(OTU, into = c("Kingdom", "Phylum", "Class", "Order", 
+                             "Family"), sep = ";") %>%
+  mutate(OTU = row_number()) %>%
+  select(OTU, everything())
+```
+
+This chunk is meant to clean up the data and sort it by Group and by Week
+
+```{r Clean and Sort}
+## Update the OTU table with OTU IDs ##
+OTU_Unfiltered$OTU <- sprintf("OTU%04d", 1:nrow(OTU_Unfiltered))
+bCT_Taxonomy_Unfiltered$OTU <- sprintf("OTU%04d", 1:nrow(bCT_Taxonomy_Unfiltered))
+
+## Replace possible NA values in your metadata file ##
+bCT_Metadata_Unsorted <- bCT_Metadata_Unsorted %>% 
+  mutate(across(Gender, ~replace_na(.x, "U"))) 
+# %>% 
+  # filter(!Gender == "U")
+
+## Make the Taxonomy file cleaner ##
+bCT_Taxonomy_Unfiltered <- bCT_Taxonomy_Unfiltered %>%
+  mutate_if(is.character, ~ sub('^.+__', '', .))
+
+OTU_Unfiltered_t <- OTU_Unfiltered %>%
+  pivot_longer(cols = -OTU, names_to = "Sample", values_to = "Value") %>%
+  mutate(Sample = as.numeric(Sample)) %>% 
+  pivot_wider(names_from = OTU, values_from = Value)
+
+## Sort the data by Group and by Week ##
+bCT_Merged_Unfiltered <- merge(bCT_Metadata_Unsorted, OTU_Unfiltered_t, 
+                               by.x = "Sample")
+
+bCT_Merged_Unfiltered <- bCT_Merged_Unfiltered %>%
+  arrange(desc(Group == "PB"), desc(Group == "LC"), Week)
+
+Ordered_Samples <- bCT_Merged_Unfiltered$Sample
+OTU_Unfiltered <- OTU_Unfiltered[, c('OTU', Ordered_Samples)]
+
+Ordered_Samples <- as.character(Ordered_Samples)
+bCT_Metadata <- bCT_Metadata_Unsorted[match(Ordered_Samples, bCT_Metadata_Unsorted$Sample), ] %>% 
+  mutate(Sample = as.character(Sample))
+
+## Remove the OTUs corresponding to Archaea ##
+OTU_Unfiltered <- subset(OTU_Unfiltered,
+  !(rownames(OTU_Unfiltered) %in% rownames(subset(bCT_Taxonomy_Unfiltered,
+                                                        Kingdom == "Archaea"))))
+
+bCT_Taxonomy_Unfiltered <- subset(bCT_Taxonomy_Unfiltered, Kingdom != "Archaea")
+
+## Rename the OTUs again ##
+OTU_Unfiltered$OTU <- sprintf("OTU%04d", 1:nrow(OTU_Unfiltered))
+bCT_Taxonomy_Unfiltered$OTU <- sprintf("OTU%04d", 1:nrow(bCT_Taxonomy_Unfiltered))
+```
+
+Normalize the data and remove the OTUs that do not consist of 0.1% of the total for at least 25% of the Samples
+
+```{r Normalise and Filter 0.1%}
+## Normalise the data ## 
+OTU_Unf_norm <- OTU_Unfiltered %>%
+  mutate(across(where(is.numeric), ~ .x * (100 / sum(.x))))
+
+OTU_table <- OTU_Unf_norm[apply(OTU_Unf_norm[-1] / colSums(OTU_Unf_norm[-1]) > 0.001, 1, any), ]
+OTU_table <- OTU_Unf_norm[apply(OTU_Unf_norm[-1] / colSums(OTU_Unf_norm[-1]) > 0.001, 1, mean) > 0.25, ]
+
+OTU_table <- OTU_table %>%
+  mutate(across(where(is.numeric), ~ .x * (100 / sum(.x))))
+```
+
+Create the three main files to
+
+```{r Main files}
+Metadata <- bCT_Metadata %>%
+  # filter(Gender == "M" | Gender == "F") %>%
+  arrange(desc(Group)) %>% 
+  select(Sample, Group, Week
+         # , Gender
+         ) %>%
+  mutate(Sample = as.character(Sample)) %>% 
+  mutate(Week = replace(Week, Week == "0", "01")) %>% 
+  unite(Group, Group, Week, sep = "", remove = TRUE) 
+
+TAX_table <- bCT_Taxonomy_Unfiltered %>% 
+  filter(OTU %in% OTU_table$OTU) %>%
+  mutate_all(~ str_replace_all(., "\\[|\\]", ""))
+
+OTU_table <- OTU_table %>% 
+  select(., -setdiff(colnames(OTU_table[-1]), Metadata$Sample))
+
+OTU_table_t <- OTU_table %>%
+  pivot_longer(cols = -OTU, names_to = "Sample", values_to = "Value") %>%
+  pivot_wider(names_from = OTU, values_from = Value) %>% 
+  inner_join(Metadata, ., by = "Sample")
+
+```
+
+Create a colour pallete for the visualization. Try to use colourblind friendly colours to not get gutted by the second reviewer
+
+```{r Colour Pallete}
+## Create the pallete to slay ##
+Pallete <- c("coral1", "deeppink3", "dodgerblue3", "cyan3", "mediumspringgreen")
+
+color_palette_function <- colorRampPalette(Pallete)
+```
+
+Calculate statistics and prepare the dataframes for visualization, also pool the low abundance families and phyla to the Other Group and sort them in descending order so the plots have smoother transitions.
+
+```{r RA Statistics and Preparation}
+## Calculate the min, max and such for each OTU, add the metric along with the OTU in the column name, pivot wider and separate the statistic from the OTU and then transpose the dataframe and merge the Group name with the metric ##
+OTU_Metrics <- OTU_table_t %>%
+  group_by(Group) %>%
+  summarise(across(starts_with("OTU"), 
+                   list(Min = min, Max = max, Median = median, Mean = mean), .names = "{.col}_{.fn}")) %>%
+  pivot_longer(cols = -Group, names_to = c("OTU", "Statistic"), names_sep = "_", values_to = "Value") %>%
+  unite("Metric", c("Group", "Statistic"), sep = "_") %>%
+  pivot_wider(names_from = "Metric", values_from = "Value")
+
+## Make the dataframe long, remove the _unclassified suffix and add * * to the families/phyla to work with rmarkdown later on ## 
+OTU_long <- OTU_table_t %>%
+  pivot_longer(cols = c(-Sample, -Group),
+               names_to = "OTU", values_to = "Abundance") %>% 
+  add_column(Family = TAX_table$Family[match(.$OTU, TAX_table$OTU)]) %>% 
+  add_column(Phylum = TAX_table$Phylum[match(.$OTU, TAX_table$OTU)]) %>%
+  mutate(Family = str_replace_all(Family, "^(.*)$", "*\\1*"),
+         Family = str_replace(Family, "(.*)_unclassified\\*$", "Unclassified \\1*"),
+         Family = str_replace_all(Family, "^(\\S)$", "*\\1*"), 
+         Phylum = str_replace(Phylum, "^(.*)$", "*\\1*")) 
+
+## Create an initial order for the samples based on each sample's relative Enterobacteriaceae abundance ##
+OTU_long <- OTU_long %>%
+  filter(Family == "*Enterobacteriaceae*") %>%
+  arrange(desc(Abundance)) %>%
+  mutate(Order = 1:nrow(.)) %>%
+  select(Sample, Order) %>%
+  inner_join(., OTU_long, by = "Sample") %>% 
+  mutate(Sample = factor(Sample), 
+         Sample = fct_reorder(Sample, Order))
+
+## Pool the families based on their relative abundance ##
+OTU_long <- OTU_long %>%
+  group_by(Family) %>%
+  summarise(Pool_F = max(Abundance) < 5, .groups = "drop") %>%
+  inner_join(OTU_long, ., by = "Family") %>%
+  mutate(Family_Pooled = if_else(Pool_F, "Other", Family), .after = Family) %>%
+  group_by(Group, Family) %>% 
+  mutate(Family_Pooled = factor(Family_Pooled), 
+         Family_Pooled = fct_reorder(Family_Pooled, Abundance, .desc = TRUE),
+         Family_Pooled = fct_shift(Family_Pooled, n = 1)) 
+
+## Pool the phyla based on their relative abundance ##
+OTU_long <-  OTU_long %>%
+  group_by(Phylum) %>%
+  summarise(Pool_Ph = max(Abundance) < 1, .groups = "drop") %>% ## This is the line you determine the percentage threshhold to be pooled ##
+  inner_join(OTU_long, ., by = "Phylum") %>%
+  mutate(Phylum_Pooled = if_else(Pool_Ph, "Other", Phylum), .after = Phylum) %>%
+  group_by(Group, Phylum) %>% 
+  mutate(Phylum_Pooled = factor(Phylum_Pooled), 
+         Phylum_Pooled = fct_reorder(Phylum_Pooled, Abundance, .desc = TRUE), 
+         Phylum_Pooled = fct_shift(Phylum_Pooled, n = 1)) 
+
+## Check this again later to reduce the code ##
+OTU_Phylum_long <- OTU_long %>% 
+  select(Sample, Order, Group, Abundance, Phylum, Phylum_Pooled) %>% 
+  group_by(Sample, Phylum) %>% 
+  mutate(Abundance = sum(Abundance)) %>% 
+  distinct() 
+
+OTU_long <- OTU_long %>% 
+  ungroup() %>% 
+  select(Sample, OTU, Order, Group, Abundance, Family, Family_Pooled)
+
+## This part is to sum the "Other" family and convert the pooled family column to a factor so we can control the order of the families easier. This does not currently work ##
+# Other_Sum <- OTU_long %>%
+#   filter(Family_Pooled == "Other") %>%
+#   group_by(Sample, Order, Group) %>%
+#   summarise(Abundance = sum(Abundance), .groups = 'drop') %>%
+#   mutate(Family_Pooled = "Other")
+# 
+# OTU_long <- OTU_long %>%
+#   filter(Family_Pooled != "Other") %>%
+#   bind_rows(Other_Sum) %>% 
+#   mutate(Family_Pooled = as.factor(Family_Pooled)) %>%
+#   mutate(Family_Pooled = factor(Family_Pooled, levels = c("Other", setdiff(levels(Family_Pooled), "Other"))))
+
+## Save the statistics for the OTUs ##
+# write.csv(OTU_Stats, "CSVs/OTU_Stats.csv", row.names = FALSE)
+  
+```
+
+Create relative abundance tables with Means and Medians for later use
+
+```{r OTU Means and Medians}
+## Create a dataframe for the median relative abundance per Group for each Family and Phylum, and make the data markdown ready ##
+OTU_Median_Rel <- OTU_table_t %>%
+  group_by(Group) %>%
+  summarise_at(vars(starts_with("OTU")), ~ median(.x, na.rm = TRUE)) %>% 
+  rowwise() %>% 
+  mutate(across(where(is.numeric), ~ (.x / sum(c_across(where(is.numeric))) * 100))) %>% 
+  pivot_longer(cols = -Group, names_to = "OTU", values_to = "Rel_Median_Abundance") %>% 
+  add_column(Family = TAX_table$Family[match(.$OTU, TAX_table$OTU)], .after = 2) %>% 
+  add_column(Phylum = TAX_table$Phylum[match(.$OTU, TAX_table$OTU)], .after = 2) %>% 
+  mutate(Family = str_replace_all(Family, "^(.*)$", "*\\1*"),
+         Family = str_replace(Family, "(.*)_unclassified\\*$", "Unclassified \\1*"),
+         Family = str_replace_all(Family, "^(\\S)$", "*\\1*"), 
+         Phylum = str_replace_all(Phylum, "^(.*)$", "*\\1*")) 
+
+## Pool the families with a median relative abundance less than 1% (Or whatever percentage) to the "Other" family ##
+OTU_Median_Rel <- OTU_Median_Rel %>%
+  group_by(Family) %>%
+  summarise(Pool = max(Rel_Median_Abundance) < 1, .groups = "drop") %>%
+  inner_join(OTU_Median_Rel, ., by = "Family") %>%
+  mutate(Family_Pooled = if_else(Pool, "Other", Family), .after = Family) %>%
+  group_by(Group, Family)
+
+## Create a Median dataframe just for the Phyla ##
+OTU_Phylum_long_Median_Rel <- OTU_Median_Rel %>% 
+  ungroup() %>% 
+  select(Group, Phylum, Rel_Median_Abundance) %>% 
+  group_by(Group, Phylum) %>% 
+  mutate(Rel_Median_Abundance = sum(Rel_Median_Abundance)) %>% 
+  distinct() 
+
+## Create am Order vector to use as factor levels for later use ##
+OTU_Order <- OTU_Median_Rel %>% 
+  ungroup() %>% 
+  distinct(Family, .keep_all = TRUE) %>%
+  arrange(desc(Rel_Median_Abundance)) %>% 
+  select(Family, OTU) 
+```
+
+--- Visuals --- Relative Abundance Plots \~ Family level
+
+```{r Relative Abundance Plots ~ Family level}
+## Family RA per Sample, Descending Enterobacteria order
+## Assign an order to the first week's samples based on the enterobacteria relative (median) abundance, convert the samples column to a factor and reorder them ##
+Sample_codes_Order <- OTU_long %>%
+  select(-Order) %>% 
+  ungroup() %>%
+  filter(Family == "*Enterobacteriaceae*") %>%
+  filter(Group == "PB01" | Group == "LC01") %>% 
+  arrange(desc(Abundance)) %>%
+  mutate(Sample_Alt = substr(Sample, 2, 3)) %>%
+  distinct(Sample_Alt, .keep_all = TRUE) %>% 
+  mutate(Order = 1:nrow(.)) %>%
+  select(Sample, Sample_Alt, Order) %>%
+  mutate(Sample = factor(Sample), 
+         Sample = fct_reorder(Sample, Order)) %>% 
+  arrange(Order)
+
+## Inner join the order df with the OTU_long df by the alternative codes (just the sample id, not the week prefix) and visuilise the resulting dataframe by Group ##
+RA_Fam_Samples_Plot <- OTU_long %>% 
+  mutate(Sample_Alt = substr(Sample, 2, 3)) %>%
+  select(-c(Order, Sample)) %>% 
+  inner_join(Sample_codes_Order, by = "Sample_Alt") %>% 
+  mutate(Sample = substr(Sample, 2, 3)) %>%
+  # arrange(Order) %>% 
+  ggplot(., aes(x = reorder(Sample, Order), y = Abundance, fill = reorder(Family_Pooled, Abundance))) +
+  geom_bar(stat = "identity", width = 1, colour = "black", linewidth = 0.05) +
+  scale_fill_manual(values = color_palette_function(length(unique(OTU_long$Family_Pooled)))) +  
+  ggtitle("Relative Family Abundance per Sample - Grouped") + 
+  theme(legend.key.size = unit(0.4, "cm"), 
+        plot.title = element_text(hjust = 0.5), 
+        axis.text.x = element_text(size = 6, angle = 45, hjust = 1), , 
+        legend.text = element_markdown()) + 
+  guides(fill = guide_legend(ncol = 1)) +
+  labs(fill = "Family") +
+  facet_wrap(~Group, nrow = 1, scales = "free_x") +
+  ylab("Relative Abundance") +
+  xlab("Sample")
+
+## Family RA per Group ##
+RA_Fam_Groups_Plot <- ggplot(OTU_Median_Rel, aes(x = Group, y = Rel_Median_Abundance, 
+                                                  fill =  reorder(Family_Pooled, Rel_Median_Abundance))) + 
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = color_palette_function(length(unique(OTU_Median_Rel$Family_Pooled)))) +  
+  ggtitle("Relative Family Abundance per Group") + 
+  theme(legend.key.size = unit(0.4, "cm"), 
+        plot.title = element_text(hjust = 0.5), 
+        axis.text.x = element_blank(), 
+        legend.text = element_markdown(), 
+        axis.title.x = element_blank()) + 
+  guides(fill = guide_legend(ncol = 1)) +
+  labs(fill = "Family") +
+  facet_wrap(~Group, nrow = 1, scales = "free_x") +
+  ylab("Relative Abundance") 
+
+## Unc_Family RA per Group ##
+RA_Un_Fam_Plot <- OTU_Median_Rel %>%
+  filter(grepl("Unclassified", Family)) %>% 
+  ggplot(., aes(x = Group, y = Rel_Median_Abundance, fill =  reorder(Family, Rel_Median_Abundance))) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = color_palette_function(
+    length(unique(grep("Unclassified ", OTU_Median_Rel$Family, value = TRUE))))) +
+  ggtitle("Unclassified Families Percentages") + 
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.key.size = unit(0.4, "cm"), 
+        axis.text.x = element_text(size = 6, angle = 45, hjust = 1), 
+        legend.text = element_markdown()) + 
+  guides(fill = guide_legend(ncol = 1)) +
+  labs(fill = "Unclassified Families") +
+  ylab("Relative Abundance")
+
+## Barplot per Family with the families on the side axis ##
+RA_Fam_alt_Plot <- ggplot(OTU_Median_Rel, aes(y = reorder(Family_Pooled, Rel_Median_Abundance, FUN = median), 
+                         x = Rel_Median_Abundance, fill = Group)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  scale_fill_manual(values = color_palette_function(length(unique(OTU_Median_Rel$Group)))) +  
+  ggtitle("Relative Family Abundance, divided per Group") + 
+  theme(legend.key.size = unit(0.4, "cm"), 
+        plot.title = element_text(hjust = 0.5), 
+        axis.text.y = element_markdown(size = 6, hjust = 1, face = "bold"), 
+        legend.text = element_markdown(), 
+        axis.title.y = element_blank(), 
+        panel.background = element_rect(fill = "grey75"), 
+        legend.key = element_blank()) + 
+  guides(fill = guide_legend(ncol = 1)) +
+  labs(fill = "Group") +
+  xlab("Relative Abundance")
+
+## Print the plots ##
+RA_Fam_Samples_Plot
+RA_Fam_Groups_Plot
+RA_Un_Fam_Plot
+RA_Fam_alt_Plot
+
+```
+
+--- Visuals --- Relative Abundance Plots \~ Phylum level
+
+```{r Relative Abundance Plots ~ Phylum level}
+## Phylum RA per Sample ##
+Sample_codes_Order_Phylum <- OTU_Phylum_long %>%
+  select(-Order) %>% 
+  ungroup() %>%
+  filter(Phylum == "*Firmicutes*") %>%
+  filter(Group == "PB01" | Group == "LC01") %>% 
+  arrange(desc(Abundance)) %>%
+  mutate(Sample_Alt = substr(Sample, 2, 3)) %>%
+  distinct(Sample_Alt, .keep_all = TRUE) %>% 
+  mutate(Order = 1:nrow(.)) %>%
+  select(Sample, Sample_Alt, Order) %>%
+  mutate(Sample = factor(Sample), 
+         Sample = fct_reorder(Sample, Order)) %>% 
+  arrange(Order)
+
+## Inner join the order df with the OTU_long df by the alternative codes (just the sample id, not the week prefix) and visuilise the resulting dataframe by Group ##
+RA_Phy_Samples_Plot <- OTU_Phylum_long %>% 
+  mutate(Sample_Alt = substr(Sample, 2, 3)) %>%
+  select(-c(Sample,Order)) %>% 
+  inner_join(Sample_codes_Order, by = "Sample_Alt") %>% 
+  mutate(Sample = substr(Sample.x, 2, 3)) %>%
+  # arrange(Order) %>% 
+  ggplot(., aes(x = reorder(Sample_Alt, Order), y = Abundance, fill = reorder(Phylum_Pooled, Abundance))) +
+  geom_bar(stat = "identity", width = 1) +
+  scale_fill_manual(values = color_palette_function(length(unique(OTU_Phylum_long$Phylum_Pooled)))) +  
+  ggtitle("Relative Phylum Abundance per Sample - Grouped") + 
+  theme(legend.key.size = unit(0.4, "cm"), 
+        plot.title = element_text(hjust = 0.5), 
+        axis.text.x = element_text(size = 6, angle = 45, hjust = 1), , 
+        legend.text = element_markdown()) + 
+  guides(fill = guide_legend(ncol = 1)) +
+  labs(fill = "Phylum") +
+  facet_wrap(~Group, nrow = 1, scales = "free_x") +
+  ylab("Relative Abundance") +
+  xlab("Sample")
+
+## Phylum RA per Group ##
+RA_Phy_Groups_Plot <- ggplot(OTU_Phylum_long_Median_Rel, aes(x = Group, y = Rel_Median_Abundance, 
+                fill =  reorder(Phylum, Rel_Median_Abundance))) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = color_palette_function(length(unique(OTU_Phylum_long_Median_Rel$Phylum)))) +  
+  ggtitle("Relative Phylum Abundance per Group") + 
+  theme(plot.title = element_text(hjust = 0.5), 
+        legend.key.size = unit(0.4, "cm"), 
+        axis.text.x = element_blank(), 
+        legend.text = element_markdown(), 
+        axis.title.x = element_blank()) + 
+  guides(fill = guide_legend(ncol = 1)) +
+  labs(fill = "Phylum") +
+  facet_wrap(~Group, nrow = 1, scales = "free_x") +
+  ylab("Relative Abundance")
+
+RA_Phy_alt_Plot <- ggplot(OTU_Phylum_long_Median_Rel, aes(y = reorder(Phylum, Rel_Median_Abundance, FUN = median), 
+                                                          x = Rel_Median_Abundance, fill = Group)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  scale_fill_manual(values = color_palette_function(length(unique(OTU_Phylum_long_Median_Rel$Group)))) +  
+  ggtitle("Relative Phylum Abundance, divided per Group") + 
+  theme(legend.key.size = unit(0.4, "cm"), 
+        plot.title = element_text(hjust = 0.5), 
+        axis.text.y = element_markdown(size = 6, hjust = 1, face = "bold"), 
+        legend.text = element_markdown(), 
+        axis.title.y = element_blank(), 
+        panel.background = element_rect(fill = "grey75"), 
+        legend.key = element_blank()) + 
+  guides(fill = guide_legend(ncol = 1)) +
+  labs(fill = "Group") +
+  xlab("Relative Abundance")
+
+RA_Phy_Samples_Plot
+RA_Phy_Groups_Plot
+RA_Phy_alt_Plot
+```
+
+Create a dataframe just for the Firmicutes and Bacteroidetes Abundances called F2B and create a new Vector called Ratio that will contain their F2B ratio
+
+```{r F2B Statistics}
+## Firmicutes to Bacteroidetes Ratio ##
+F2B <- OTU_Phylum_long %>%
+  ungroup() %>% 
+  filter(Phylum == "*Firmicutes*") %>%
+  group_by(Sample, Group) %>%
+  mutate(Firm = Abundance) %>% 
+  select(Sample, Group, Firm)
+
+F2B$Bact <- OTU_Phylum_long %>%
+  filter(Phylum == "*Bacteroidetes*") %>%
+  mutate(Bact = Abundance) %>% 
+  pull(Bact)
+
+F2B <- F2B %>%
+  mutate(Ratio = Firm / Bact)
+
+shapiro.test(F2B$Ratio)
+
+## Calculate the means and medians for the ratios to visualize the difference using a pie chart for each group pair. Save the resulting dataframes within a list to reduce the amount of clutter and for easy access to the data later ##
+F2B_stats <- list(Stats = F2B %>%
+  group_by(Group) %>%
+  summarise(
+    # Mean_F = mean(Firm/(Firm+Bact) * 100, na.rm = TRUE),
+    #         Mean_B = mean(Bact/(Firm+Bact) * 100, na.rm = TRUE), 
+    #         Mean_F2B = Mean_F / Mean_B, 
+            Median_F = median(Firm),
+            Median_B = median(Bact), 
+            Median_F2B = median(Ratio)) %>%
+  ungroup() ## %>% 
+  # pivot_longer(cols = -c(Group, 
+  #                        # Mean_F2B, 
+  #                        Median_F2B), names_to = "Ratio", values_to = "Value")
+)
+
+F2B_stats$Stats_alt <- OTU_Phylum_long %>% 
+  ungroup() %>% 
+  select(Sample, Group, Phylum, Abundance) %>% 
+  pivot_wider(names_from = Phylum, values_from = Abundance) %>%
+  group_by(Group) %>%
+  summarise(Median_Total = median(`*Actinobacteria*`) + median(`*Bacteroidetes*`) + median(`*Firmicutes*`) + median(`*Proteobacteria*`) + 
+              median(`*Tenericutes*`) + median(`*Verrucomicrobia*`),
+            Median_F = median(`*Firmicutes*`) / Median_Total * 100,
+            Median_B = median(`*Bacteroidetes*`) / Median_Total * 100) %>% 
+  ungroup() %>% 
+  pivot_longer(cols = -c(Group, Median_Total), names_to = "Metric", values_to = "Value")
+
+## Save the statistics ##
+# write_csv(F2B, "CSVs/F2B_Values.csv")
+# write_csv(F2B_stats, "CSVs/F2B_stats.csv")
+
+## Subgroup each group pair into a dataframe withing the list and perform the wilcox tests. Save the test results in case you want to add them to the plots later on ## 
+F2B_stats$F2B_PB <- F2B %>%
+  filter(Group == "PB01" | Group == "PB12") %>% 
+  ungroup() %>%
+  mutate(Sample_alt = substr(Sample, 2, 3)) %>%
+  arrange(Sample_alt) %>% 
+  pivot_wider(id_cols = Sample_alt, names_from = Group, values_from = Ratio)
+
+F2B_stats$F2B_LC <- F2B %>%
+  filter(Group == "LC01" | Group == "LC12") %>% 
+  ungroup() %>%
+  mutate(Sample_alt = substr(Sample, 2, 3)) %>%
+  arrange(Sample_alt) %>% 
+  pivot_wider(id_cols = Sample_alt, names_from = Group, values_from = Ratio)
+
+F2B_stats$PB_Test <- wilcox.test(F2B_stats$F2B_PB$PB01, F2B_stats$F2B_PB$PB12, paired = TRUE, exact = TRUE)
+F2B_stats$LC_Test <- wilcox.test(F2B_stats$F2B_LC$LC01, F2B_stats$F2B_LC$LC12, paired = TRUE, exact = TRUE)
+
+```
+
+Visualize the F2B Ratio results as pie charts
+
+```{r F2B Visualization}
+## Placebo Group ##
+F2B_Pie_PB <- F2B_stats$Stats_alt %>% 
+  filter(Group == "PB01" | Group == "PB12") %>% 
+  ggplot(., aes(x = Group, y = Value, fill = Metric)) +
+    geom_col() +
+    coord_polar("y", start = 0) +
+    theme_classic() +
+    labs(title = "*Firmicutes* to *Bacteroidetes* ratio ~ Placebo Group", x = "", y = "") +
+    scale_fill_manual(values = c(Pallete[2], Pallete[4]), 
+                      labels = c("*Bacteroidetes*", "*Firmicutes*")) + 
+    theme(plot.title = element_markdown(hjust = 0.5), 
+          legend.title = element_blank(), 
+          legend.text = element_markdown()) +
+    ylim(0, 100)
+
+## Probiotic Group ##
+F2B_Pie_LC <- F2B_stats$Stats_alt %>% 
+  filter(Group == "LC01" | Group == "LC12") %>% 
+  ggplot(., aes(x = Group, y = Value, fill = Metric)) +
+  geom_col() +
+  coord_polar("y", start = 0) +
+  theme_classic() +
+  labs(title = "*Firmicutes* to *Bacteroidetes* ratio ~ Probiotic Group", x = "", y = "") +
+  scale_fill_manual(values = c(Pallete[2], Pallete[4]), 
+                    labels = c("*Bacteroidetes*", "*Firmicutes*")) + 
+  theme(plot.title = element_markdown(hjust = 0.5), 
+        legend.title = element_blank(), 
+        legend.text = element_markdown()) +
+    ylim(0, 100)
+
+F2B_Ratio_Boxplots <- F2B %>%
+    # filter(Ratio <= 100) %>% ## You can filter out the outliers to improve the plot. This of course, is wrong methodology ##
+    mutate(Group_alt = substr(Group, 1, 2)) %>% 
+    ggplot(., aes(x = Group, y = Ratio, fill = Group)) + 
+    geom_boxplot(alpha = 0.8) +
+    scale_fill_manual(values = color_palette_function(length(unique(F2B$Group)))) +  
+    theme(plot.title = element_markdown(hjust = 0.5),
+          panel.background = element_rect(fill = "grey75"),
+          axis.title.x = element_blank(), axis.text.x = element_text(size = 8, angle = 45, hjust = 1), 
+          legend.key = element_blank()) + 
+    ggtitle("*Firmicutes* to *Bacteroidetes* Ratio") + 
+    guides(fill = guide_legend(ncol = 1)) +
+    labs(fill = "Group") + 
+    stat_compare_means(method = "wilcox.test", paired = TRUE, label = "p.signif", 
+                       comparisons = list( c("PB01", "PB12"), c("LC01", "LC12"))) 
+    #+ ggh4x::facet_grid2(~ Group_alt, scales = "free", independent = "y")
+
+F2B_Boxplots <- F2B %>%
+  pivot_longer(cols = -c("Sample", "Group", "Ratio"), names_to = "Phylum", values_to = "Median_Abundance") %>% 
+  ggplot(., aes(x = Group, y = Median_Abundance, fill = Phylum)) + 
+    geom_boxplot(alpha = 0.8) +
+    scale_fill_manual(values = color_palette_function(length(unique(F2B$Group))),
+                      labels = c("*Bacteroidetes*", "*Firmicutes*")) +
+    # facet_wrap(~Group, scales = "free_x", nrow = 1) +
+    theme(plot.title = element_markdown(hjust = 0.5),
+          panel.background = element_rect(fill = "grey75"),
+          axis.title.x = element_blank(), axis.text.x = element_text(size = 8, angle = 45, hjust = 1),
+          legend.text = element_markdown(), 
+          legend.key = element_blank()) + 
+    ggtitle("*Firmicutes* to *Bacteroidetes* Comparison") + 
+    guides(fill = guide_legend(ncol = 1)) +
+    labs(fill = "Phyla") +
+    ylab("Abundance") + 
+  stat_compare_means(method = "wilcox.test", paired = TRUE, label = "p.signif",
+                     comparisons = list( c("PB01", "PB12"), c("LC01", "LC12")))
+
+F2B_Pie_PB
+F2B_Pie_LC
+F2B_Ratio_Boxplots
+F2B_Boxplots
+```
+
+Paired Wilcox tests for all groups. Check for significant differences between OTUs with the Kruskal Wallis test first and then pipe the ones with a P-value < 0.05 to the Wilcoxon test. In case you have multiple comparisons between multiple groups, change the test to a pairwise Wilcoxon using the supplementary code. Keep in mind that this will require a p-adjustment. 
+
+```{r OTU Significance ~ Family}
+## Kruskal - Wallis test to check for generally significant OTUs ##
+Significant_OTUs_LC <- OTU_long %>% 
+  filter(Group == "LC01" | Group == "LC12") %>%
+  ungroup() %>%
+  mutate(Sample_ID = substr(Sample, start = 2, stop = 3)) %>%
+  arrange(., Sample_ID) %>% 
+  group_by(OTU) %>% 
+  nest() %>% 
+  mutate(Kruskal_OTUs = map(.x = data, ~kruskal.test(Abundance ~ Group, data = .x) %>% 
+      tidy())) %>% 
+  unnest() %>% 
+  ungroup() %>% 
+  rename(P_value_KS = p.value)
+
+Significant_OTUs_PB <- OTU_long %>% 
+  filter(Group == "PB01" | Group == "PB12") %>%
+  ungroup() %>%
+  mutate(Sample_ID = substr(Sample, start = 2, stop = 3)) %>%
+  arrange(., Sample_ID) %>% 
+  group_by(OTU) %>% 
+  nest() %>% 
+  mutate(Kruskal_OTUs = map(.x = data, ~kruskal.test(Abundance ~ Group, data = .x) %>% 
+      tidy())) %>% 
+  unnest() %>% 
+  ungroup() %>% 
+  rename(P_value_KS = p.value)
+
+## Normal WIlcoxon, paired. Save the significant OTU for each group pair ##
+OTU_tests <- Significant_OTUs_PB %>%
+  # filter(P_value_KS < 0.05) %>%
+  group_by(OTU) %>% 
+  nest() %>% 
+  mutate(Wilcox = map(.x = data, ~ wilcox.test(
+      x = .x$Abundance[.x$Group == "PB01"],
+      y = .x$Abundance[.x$Group == "PB12"],
+      paired = TRUE, exact = TRUE) %>%
+      tidy())) %>%
+  unnest() ## %>%
+  # select(Family, Group, p.value) 
+  
+OTU_tests <- Significant_OTUs_LC %>%
+  # filter(P_value_KS < 0.05) %>%
+  group_by(OTU) %>% 
+  nest() %>% 
+  mutate(Wilcox = map(.x = data, ~ wilcox.test(
+      x = .x$Abundance[.x$Group == "LC01"],
+      y = .x$Abundance[.x$Group == "LC12"],
+      paired = TRUE, exact = TRUE) %>%
+      tidy())) %>%
+  unnest() %>%
+  # select(Family, Group, p.value) %>%
+  bind_rows(., OTU_tests)
+
+## Visualise the p values ##
+Families_p_values <- OTU_tests %>%
+  ungroup() %>%
+  mutate(Group = substr(.$Group, 1, 2)) %>%
+  ggplot(., aes(y = reorder(Family, Abundance), x = p.value, fill = Group)) +
+  geom_point(shape = 21, size = 2) +
+  scale_fill_manual(values = c("PB" = Pallete[5], "LC" = Pallete[2])) +
+  geom_vline(aes(xintercept = 0.05),
+             color = "black",
+             linetype = "dotted") +
+  annotate("text", x = 0.035, y = 12, label = "p = 0.05", angle = 90, size = 3) +
+  scale_x_continuous(limits = c(0, 1), breaks = seq(0, 1, by = 0.25)) +
+  labs(y = "Family", x = "P value", title = "Paired Wilcoxon ~ P-Values") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.text.y = element_markdown(size = 7, hjust = 1))
+
+## Realtive log - abundance for the significant families ##
+OTU_Sign <- OTU_tests %>% 
+  mutate(Group_alt = substr(Group, 1, 2)) %>%
+  group_by(OTU, Group, Group_alt) %>% 
+  filter(p.value < 0.05) %>% 
+  nest() %>% 
+  select(OTU)
+
+OTU_Sign <- OTU_long %>%
+  inner_join(OTU_Sign, by = c("OTU", "Group"))
+
+Families_Sign_Plot <- OTU_Sign %>% 
+  ungroup() %>%
+  mutate(Abundance = Abundance + 1/20000) %>% 
+  ggplot(., aes(x = Abundance, y = Family, color = Group, fill = Group)) + 
+  geom_jitter(position = position_jitterdodge(dodge.width = 1, 
+                                              jitter.width = 0.1), shape = 21) +
+  scale_color_manual(values = color_palette_function(length(unique(OTU_long$Group)))) +
+  scale_fill_manual(values = color_palette_function(length(unique(OTU_long$Group)))) +
+  stat_summary(fun.data = median_hilow, 
+               fun.args = list(conf.int = 0.5), 
+               geom = "pointrange", 
+               position = position_dodge(width = 1), 
+               colour = "black", 
+               show.legend = FALSE) +
+  theme(panel.background = element_rect(fill = "gray75"),
+        axis.text.y = element_markdown(), 
+        axis.title.y = element_blank(), 
+        plot.title = element_text(hjust = 0.5), 
+        strip.text = element_blank()) +
+  ggtitle("Relative abundance of significant families, log scale") +
+  scale_x_log10() +
+  facet_wrap(~Group_alt, nrow = 2, scales = "free_y")
+
+Families_p_values
+# Families_Sign_Plot
+
+
+```
+
+Paired Wilcox tests for all groups. Check for significant differences between OTUs with the Kruskal Wallis test first and then pipe the ones with a P-value < 0.05 to the Wilcoxon test. In case you have multiple comparisons between multiple groups, change the test to a pairwise Wilcoxon using the supplementary code. Keep in mind that this will require a p-adjustment. 
+
+```{r OTU Significance ~ Phylum}
+## Kruskal - Wallis test to check for generally significant OTUs ##
+Significant_Phyla_LC <- OTU_Phylum_long %>% 
+  filter(Group == "LC01" | Group == "LC12") %>%
+  ungroup() %>%
+  mutate(Sample_ID = substr(Sample, start = 2, stop = 3)) %>%
+  arrange(., Sample_ID) %>% 
+  group_by(Phylum) %>% 
+  nest() %>% 
+  mutate(Kruskal_OTUs = map(.x = data, ~kruskal.test(Abundance ~ Group, data = .x) %>% 
+      tidy())) %>% 
+  unnest() %>% 
+  ungroup() %>% 
+  rename(P_value_KS = p.value)
+
+Significant_Phyla_PB <- OTU_Phylum_long %>% 
+  filter(Group == "PB01" | Group == "PB12") %>%
+  ungroup() %>%
+  mutate(Sample_ID = substr(Sample, start = 2, stop = 3)) %>%
+  arrange(., Sample_ID) %>% 
+  group_by(Phylum) %>% 
+  nest() %>% 
+  mutate(Kruskal_OTUs = map(.x = data, ~kruskal.test(Abundance ~ Group, data = .x) %>% 
+      tidy())) %>% 
+  unnest() %>% 
+  ungroup() %>% 
+  rename(P_value_KS = p.value)
+
+## Normal WIlcoxon, paired. Save the significant Phylum for each group pair ##
+Phyla_tests <- Significant_Phyla_PB %>%
+  # filter(P_value_KS < 0.05) %>%
+  group_by(Phylum) %>% 
+  nest() %>% 
+  mutate(Wilcox = map(.x = data, ~ wilcox.test(
+      x = .x$Abundance[.x$Group == "PB01"],
+      y = .x$Abundance[.x$Group == "PB12"],
+      paired = TRUE, exact = TRUE) %>%
+      tidy())) %>%
+  unnest() ## %>%
+  # select(Family, Group, p.value) 
+  
+Phyla_tests <- Significant_Phyla_LC %>%
+  # filter(P_value_KS < 0.05) %>%
+  group_by(Phylum) %>% 
+  nest() %>% 
+  mutate(Wilcox = map(.x = data, ~ wilcox.test(
+      x = .x$Abundance[.x$Group == "LC01"],
+      y = .x$Abundance[.x$Group == "LC12"],
+      paired = TRUE, exact = TRUE) %>%
+      tidy())) %>%
+  unnest() %>%
+  # select(Family, Group, p.value) %>%
+  bind_rows(., Phyla_tests)
+
+## Visualise the p values ##
+Phyla_p_values <- Phyla_tests %>%
+  ungroup() %>%
+  mutate(Group = substr(.$Group, 1, 2)) %>%
+  ggplot(., aes(y = reorder(Phylum, Abundance), x = P_value_KS, fill = Group)) +
+  geom_point(shape = 21, size = 2) +
+  scale_fill_manual(values = c("PB" = Pallete[5], "LC" = Pallete[2])) +
+  geom_vline(aes(xintercept = 0.05),
+             color = "black",
+             linetype = "dotted") +
+  annotate("text", x = 0.035, y = 3.5, label = "p = 0.05", angle = 90, size = 3) +
+  scale_x_continuous(limits = c(0, 1), breaks = seq(0, 1, by = 0.25)) +  
+  labs(y = "Phylum", x = "P value", title = "Paired Wilcoxon ~ P-Values") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.text.y = element_markdown(size = 7, hjust = 1))
+
+## Realtive log - abundance for the significant families ##
+Phyla_Sign <- Phyla_tests %>% 
+  mutate(Group_alt = substr(Group, 1, 2)) %>%
+  group_by(Phylum, Group, Group_alt) %>% 
+  filter(p.value < 0.05) %>% 
+  nest() %>% 
+  select(Phylum)
+
+Phyla_Sign <- OTU_Phylum_long %>%
+  inner_join(Phyla_Sign, by = c("Phylum", "Group"))
+
+Phyla_Sign_Plot <- Phyla_Sign %>% 
+  ungroup() %>%
+  mutate(Abundance = Abundance + 1/20000) %>% 
+  ggplot(., aes(x = Abundance, y = Phylum, color = Group, fill = Group)) + 
+  geom_jitter(position = position_jitterdodge(dodge.width = 1, 
+                                              jitter.width = 0.1), shape = 21) +
+  scale_color_manual(values = color_palette_function(length(unique(OTU_long$Group)))) +
+  scale_fill_manual(values = color_palette_function(length(unique(OTU_long$Group)))) +
+  stat_summary(fun.data = median_hilow, 
+               fun.args = list(conf.int = 0.5), 
+               geom = "pointrange", 
+               position = position_dodge(width = 1), 
+               colour = "black", 
+               show.legend = FALSE) +
+  theme(panel.background = element_rect(fill = "gray75"),
+        axis.text.y = element_markdown(), 
+        axis.title.y = element_blank(), 
+        plot.title = element_text(hjust = 0.5), 
+        strip.text = element_blank()) +
+  ggtitle("Relative abundance of significant families, log scale") +
+  scale_x_log10() +
+  facet_wrap(~Group_alt, nrow = 2, scales = "free_y")
+
+Phyla_p_values
+# Phyla_Sign_Plot
+```
+
+Calculate the Alpha Diversity Indexes with the Vegan package and check for statistical significance between the paired groups. Also calculate statistics for the indexes and save them in a separate file.
+```{r Alpha Diversity Calculations}
+## Alpha diversity Indexes ##
+Metadata_Indexes <- tibble(
+  Sample = OTU_table_t$Sample, 
+  Group = OTU_table_t$Group, 
+  data.frame(Shannon = diversity(OTU_table_t[-(1:2)])), 
+  data.frame(Simpson = diversity(OTU_table_t[-(1:2)], "simpson")),
+  data.frame(Inverse_Simpson = diversity(OTU_table_t[-(1:2)], "invsimpson")), 
+  data.frame(Pielou = diversity(OTU_table_t[-(1:2)])/log(specnumber(OTU_table_t[-(1:2)]))))
+
+## Plot the distributions to check for normalization ##
+Alpha_Distribution_Histograms <- Metadata_Indexes %>% 
+  pivot_longer(cols = -c(Sample, Group), names_to = "Index", values_to = "Value") %>% 
+  ggplot(., aes(x = Value)) +
+  geom_histogram() +
+  facet_wrap(~Index, scales = "free_x") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  ggtitle("Alpha Index Distributions") +
+  ylab("Frequency")
+
+## Calculate statistics for the Indexes ##
+Index_Stats <- Metadata_Indexes %>%
+  group_by(Group) %>%
+  summarise_at(vars(colnames(Metadata_Indexes)[-(1:2)]), 
+               list(median = ~ median(.x, na.rm = TRUE)), .groups = "drop") %>% 
+  pivot_longer(cols = -Group, names_to = "Index", values_to = "Median", names_prefix = "_median") %>% 
+  mutate(Index = str_replace(Index, "_median", ""))  
+    
+Index_Stats$SE <- Metadata_Indexes %>%
+  group_by(Group) %>%
+  summarise_at(vars(colnames(Metadata_Indexes)[-(1:2)]), 
+               list(se = ~ sd(.x, na.rm = TRUE) / sqrt(n())), .groups = "drop") %>% 
+  pivot_longer(cols = -Group,  names_to = "Index", values_to = "SE",  names_prefix = "_se") %>% 
+  mutate(Index = str_replace(Index, "_se", "")) %>% 
+  pull(SE)
+
+Index_Stats$Max <- Metadata_Indexes %>%
+  group_by(Group) %>%
+  summarise_at(vars(colnames(Metadata_Indexes)[-(1:2)]), 
+               list(max = ~ median(.x, na.rm = TRUE) + (sd(.x, na.rm = TRUE) / sqrt(n())))) %>% 
+  pivot_longer(cols = -Group,  names_to = "Index", values_to = "Max",  names_prefix = "_max") %>% 
+  mutate(Index = str_replace(Index, "_max", "")) %>% 
+  pull(Max)
+  
+Index_Stats$Min <- Metadata_Indexes %>%
+  group_by(Group) %>%
+  summarise_at(vars(colnames(Metadata_Indexes)[-(1:2)]), 
+               list(min = ~ median(.x, na.rm = TRUE) - (sd(.x, na.rm = TRUE) / sqrt(n())))) %>% 
+  pivot_longer(cols = -Group,  names_to = "Index", values_to = "Min",  names_prefix = "_min") %>% 
+  mutate(Index = str_replace(Index, "_min", "")) %>% 
+  pull(Min)
+
+## Shapira Shapira ##
+## The first test is just checking for numeric values in your data frame and applies 
+## a shapiro test function for each column. If a column's values do not follow a normal distribution, ##
+## filter for them in the next command and perform a kolmogorov-smirnov test ##
+Shapiro_Alpha <- sapply(Metadata_Indexes %>% 
+         select_if(is.numeric), shapiro.test)
+
+KS_Alpha <- sapply(Metadata_Indexes %>% 
+         # select(Simpson | Inverse_Simpson) %>% ## Choose the names of the columns you would like to filter ##
+         select_if(is.numeric), function(x) {
+  ks.test(x, "pnorm", mean = mean(x, na.rm = TRUE), sd = sd(x, na.rm = TRUE))
+})
+
+Alpha_Distribution_Histograms
+```
+
+```{r Alpha Diversity Significance checking}
+## Perform the t tests ##
+## In case you want to also make tests for each gender, add two lines in the filter ##
+## section of each command and alter the preexisting ones to cover the genders. ##
+Pairwise_Index_t <- Metadata_Indexes %>%
+  nest() %>%
+  mutate(t_test = map(.x = data, ~ pairwise.t.test(
+      x = .x$Shannon, g = .x$Group, p.adjust.method = "none") %>% 
+        tidy())) %>% 
+  unnest(t_test) %>% 
+  filter((group1 == "LC12" & group2 == "LC01") |
+         (group1 == "PB12" & group2 == "PB01")) %>% 
+  mutate(Shannon_p = p.value) %>% 
+  select(-p.value, -data)
+
+Pairwise_Index_t$Simpson_p <- Metadata_Indexes %>%
+  nest() %>%
+  mutate(t_test = map(.x = data, ~ pairwise.t.test(
+    x = .x$Simpson, g = .x$Group, p.adjust.method = "none") %>% 
+      tidy())) %>% 
+  unnest(t_test) %>% 
+  filter((group1 == "LC12" & group2 == "LC01") |
+         (group1 == "PB12" & group2 == "PB01")) %>% 
+  mutate(Simpson_p = p.value) %>% 
+  pull(Simpson_p)
+
+Pairwise_Index_t$Inv_Simpson_p <- Metadata_Indexes %>%
+  nest() %>%
+  mutate(t_test = map(.x = data, ~ pairwise.t.test(
+    x = .x$Inverse_Simpson, g = .x$Group, p.adjust.method = "none") %>% 
+      tidy())) %>% 
+  unnest(t_test) %>% 
+  filter((group1 == "LC12" & group2 == "LC01") |
+         (group1 == "PB12" & group2 == "PB01")) %>% 
+  mutate(Inv_Simpson_p = p.value) %>% 
+  pull(Inv_Simpson_p)
+
+Pairwise_Index_t$Pielou_p <- Metadata_Indexes %>%
+  nest() %>%
+  mutate(t_test = map(.x = data, ~ pairwise.t.test(
+    x = .x$Pielou, g = .x$Group, p.adjust.method = "none") %>% 
+      tidy())) %>% 
+  unnest(t_test) %>% 
+  filter((group1 == "LC12" & group2 == "LC01") |
+         (group1 == "PB12" & group2 == "PB01")) %>% 
+  mutate(Pielou_p = p.value) %>% 
+  pull(Pielou_p)
+
+## Save the Alpha Diversity Indexes ##
+# write_csv(Metadata_Indexes, "CSVs/Alpha_Values.csv")
+# write_csv(Index_Stats, "CSVs/Alpha_Stats.csv")
+```
+
+Visualise the Alpha Diversity Indexes
+```{r Alpha Visualization}
+Alpha_Div_Barplots <- Metadata_Indexes %>%
+  pivot_longer(cols = -c(Sample, Group), names_to = "Index", values_to = "Value") %>% 
+  inner_join(Index_Stats, by = c("Group", "Index")) %>% 
+  ggplot(., aes(x = Group, y = Value, fill = Group)) + 
+  geom_col(data = Index_Stats, aes(x = Group, y = Median, fill = Group), 
+           position = position_dodge(width = 0.75), width = 0.6, alpha = 0.8) +
+  scale_fill_manual(values = color_palette_function(length(unique(Metadata_Indexes$Group)))) +  
+  # geom_boxplot(alpha = 0.8) + 
+  geom_jitter(width = 0, alpha = 0.3, colour = "midnightblue") +
+  ggh4x::facet_grid2(~ Index, scales = "free", independent = "y") + 
+  theme(plot.title = element_text(hjust = 0.5),
+        panel.background = element_rect(fill = "grey75"),
+        axis.title.x = element_blank(), axis.text.x = element_text(size = 8, angle = 45, hjust = 1)) + 
+  ggtitle("Alpha Diversity Indexes") + 
+  guides(fill = guide_legend(ncol = 1)) +
+  labs(fill = "Group") + 
+  stat_compare_means(method = "t.test", paired = TRUE, label = "p.signif",
+                     comparisons = list( c("PB01", "PB12"), c("LC01", "LC12"))) +
+  geom_errorbar(aes(ymin = Min, ymax = Max), width = 0.2)
+
+## Indexes - Boxplots
+Alpha_Div_Boxplots <- Metadata_Indexes %>%
+  pivot_longer(cols = -c(Sample, Group), names_to = "Index", values_to = "Value") %>% 
+  ggplot(., aes(x = Group, y = Value, fill = Group)) + 
+    geom_boxplot(alpha = 0.8) + geom_jitter(width = 0, alpha = 0.3, colour = "midnightblue") +
+    scale_fill_manual(values = color_palette_function(length(unique(Metadata_Indexes$Group)))) +  
+    ggh4x::facet_grid2(~ Index, scales = "free", independent = "y") + 
+    theme(plot.title = element_text(hjust = 0.5),
+          panel.background = element_rect(fill = "grey75"),
+          axis.title.x = element_blank(), 
+          axis.text.x = element_text(size = 8, angle = 45, hjust = 1), 
+          legend.key = element_blank()) + 
+    ggtitle("Alpha Diversity Indexes") + 
+    guides(fill = guide_legend(ncol = 1)) +
+    labs(fill = "Group") + 
+    stat_compare_means(method = "t.test", paired = TRUE, label = "p.signif",
+                     comparisons = list( c("PB01", "PB12"), c("LC01", "LC12"))) +
+    stat_summary(fun.y = "mean", color = "midnightblue", shape = 18, size = 0.8, show.legend = FALSE)
+    
+  
+Alpha_Div_Barplots
+Alpha_Div_Boxplots
+
+```
+
+```{r Beta Diversity Calculations}
+## Beta diversity time ##
+BC_Distances <- OTU_table_t %>% 
+  select(-Group) %>%
+  column_to_rownames("Sample") %>%
+  as.matrix() %>%
+  vegdist(., method = "bray") 
+
+PCoA <- cmdscale(BC_Distances, eig = TRUE, k = 2) 
+explainedvar1_bCT <- round(PCoA$eig[1] / sum(PCoA$eig), 2) * 100
+explainedvar2_bCT <- round(PCoA$eig[2] / sum(PCoA$eig), 2) * 100
+explainedvar1_bCT + explainedvar2_bCT
+colnames(PCoA$points) <- c("PCoA1","PCoA2")
+rownames(PCoA$points) <- OTU_table_t$Sample
+Permanova <- pairwise.adonis2(BC_Distances ~ Group, data = Metadata, 
+                              permutations = 999, p.adjust.method = "none")
+
+## NMDS ##
+NMDS <- metaMDS(BC_Distances)
+NMDS_data <- as.data.frame(NMDS$points)
+NMDS_data$Group <- Metadata$Group
+
+## For the heatmaps ##
+BC_DF <- as.data.frame(as.matrix(BC_Distances)) %>%
+  rownames_to_column(var = "Comparison") %>%
+  gather(key = "Sample", value = "Distance", -Comparison) %>%
+  mutate(Comparison = as.factor(Comparison), Sample = as.factor(Sample)) %>% 
+  inner_join(., Metadata, by = "Sample") %>% 
+  rename(Main_Group = Group) %>% 
+  inner_join(., Metadata, by = c("Comparison" = "Sample")) %>% 
+    rename(Comp_Group = Group)
+```
+
+Beta Diversity Visualization
+```{r Beta Diversity Visualization}
+## PCoA Plots ## 
+PCoA_LC <- PCoA$points %>%
+  as_tibble(rownames = "Sample") %>% 
+  inner_join(Metadata, by = "Sample") %>% 
+  filter(Group == "LC01" | Group == "LC12") %>% 
+  ggplot(aes(x = PCoA1, y = PCoA2)) +
+  geom_point(aes(color = Group), size = 3) +
+  stat_ellipse(aes(color = Group), show.legend = FALSE) +
+  scale_color_manual(values = c(Pallete[1], Pallete[3])) +
+  theme_minimal() +
+  theme(panel.background = element_rect(fill = "gray75"),
+        plot.title = element_text(hjust = 0.5)) +
+  labs(title = paste("PCoA Probiotic"), 
+       x = paste("PCo1 (", explainedvar1_bCT, "%)", sep = ""), 
+       y = paste("PCo2 (", explainedvar2_bCT, "%)", sep = "")) +
+  annotate("text", x = Inf, y = Inf, 
+           label = paste("p-value:", 
+                         format(Permanova$LC01_vs_LC12$`Pr(>F)`[1], digits = 3)), 
+           hjust = 1.1, vjust = 1.8, size = 4, color = "black")
+
+PCoA_PB <- PCoA$points %>%
+  as_tibble(rownames="Sample") %>% 
+  inner_join(Metadata, by = "Sample") %>% 
+  filter(Group == "PB01" | Group == "PB12") %>% 
+  ggplot(., aes(x = PCoA1, y = PCoA2)) +
+  geom_point(aes(color = Group), size = 3) +
+  stat_ellipse(aes(color = Group), show.legend = FALSE) +
+  scale_color_manual(values = c(Pallete[2], Pallete[4])) +
+  theme_minimal() +
+  theme(panel.background = element_rect(fill = "gray75"),
+        plot.title = element_text(hjust = 0.5)) +
+  labs(title = "PCoA Placebo", 
+       x = paste("PCo1 (", explainedvar1_bCT, "%)", sep = ""), 
+       y = paste("PCo2 (", explainedvar2_bCT, "%)", sep = "")) +
+  annotate("text", x = Inf, y = Inf, 
+           label = paste("p-value:", 
+                         format(Permanova$PB01_vs_PB12$`Pr(>F)`[1], digits = 3)), 
+           hjust = 1.1, vjust = 1.8, size = 4, color = "black")
+
+## NMDS Plots ##
+NMDS_LC <- NMDS_data %>% 
+  filter(Group == "LC01" | Group == "LC12") %>% 
+  ggplot(., aes(x = MDS1, y = MDS2, color = Group)) +
+  geom_point(aes(color = Group), size = 3) +
+  stat_ellipse(aes(color = Group), show.legend = FALSE) +
+  scale_color_manual(values = c(Pallete[1], Pallete[3])) +
+  theme_minimal() +
+  theme(panel.background = element_rect(fill = "gray75"),
+        plot.title = element_text(hjust = 0.5)) + 
+  labs(title = "NMDS Probiotic", x = "MDS1", y = "MDS2", color = "Group") +
+  annotate("text", x = Inf, y = Inf, 
+           label = paste("p-value:", 
+                         format(Permanova$LC01_vs_LC12$`Pr(>F)`[1], digits = 3)), 
+           hjust = 1.1, vjust = 1.8, size = 4, color = "black")
+
+NMDS_PB <- NMDS_data %>% 
+  filter(Group == "PB01" | Group == "PB12") %>% 
+  ggplot(., aes(x = MDS1, y = MDS2, color = Group)) +
+  geom_point(aes(color = Group), size = 3) +
+  stat_ellipse(aes(color = Group), show.legend = FALSE) +
+  scale_color_manual(values = c(Pallete[2], Pallete[4])) +
+  theme_minimal() +
+  theme(panel.background = element_rect(fill = "gray75"),
+        plot.title = element_text(hjust = 0.5)) + 
+  labs(title = "NMDS Placebo", x = "MDS1", y = "MDS2", color = "Group") +
+  annotate("text", x = Inf, y = Inf, 
+           label = paste("p-value:", 
+                         format(Permanova$PB01_vs_PB12$`Pr(>F)`[1], digits = 3)), 
+           hjust = 1.1, vjust = 1.8, size = 4, color = "black")
+
+## Heatmap with the comparison on the x axis ##
+Heatmap_BC <- BC_DF %>% 
+  # filter(Main_Group == "LC01" | Main_Group == "LC12") %>%
+  # filter(Main_Group == "PB01" | Group == "PB12") %>% 
+  ggplot(., aes(x = Comparison, y = Sample, fill = Distance)) +
+  geom_tile() +
+  scale_fill_gradient(low = "midnightblue", high = "mediumspringgreen") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 5), 
+        axis.text.y = element_text(hjust = 1, size = 5)) +
+  # facet_wrap(~Main_Group, ncol = 1 ,scales = "free_y") +
+  ggtitle("Heatmap comparing distances between samples", 
+          subtitle = "Distance matrix used: Bray-Curtis")
+
+## Heatmap with the comparison on the y axis ##
+Heatmap_BC_Groups <- BC_DF %>% 
+  # filter(Main_Group == "LC01" | Main_Group == "LC12") %>%
+  # filter(Main_Group == "PB01" | Group == "PB12") %>% 
+  ggplot(., aes(x = Sample, y = Comparison, fill = Distance)) +
+  geom_tile() +
+  scale_fill_gradient(low = "midnightblue", high = "mediumspringgreen") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 6), 
+        axis.text.y = element_blank()) +
+  facet_wrap(~Main_Group, ncol = 1 ,scales = "free_x") +
+  ggtitle("Heatmap comparing distances between samples", 
+          subtitle = "Distance matrix used: Bray-Curtis")
+
+PCoA_LC
+PCoA_PB
+NMDS_LC
+NMDS_PB
+Heatmap_BC
+Heatmap_BC_Groups
+```
+
+
+Biochemical data ascociation time. (Check if the biochemical markers collected from the volunteers show any ascociation with the OTUs)
+```{r Association Matrix - Biochemical - OTUs}
+## Load the biochemical data for the same weeks we are analysing. Do a quick check of their summary and check if they are between normal values or if you have any major outliers. In case you do it might be a good idea to remove the sample pairs from the analysis. This also might be mistaken, not sure. Ask your PI ##
+bCT_Biochemical <- read_csv("~/Duth/MRRN/Otu_Tables/16s_rRNA_analysis/bCT_Biochemical.csv") %>% 
+  mutate(Sample = as.character(Sample))
+
+bCT_Biochemical <- bCT_Biochemical %>% 
+  mutate(CRP = replace_na(CRP, mean(CRP, na.rm = TRUE))) 
+
+summary(bCT_Biochemical)
+
+Stats_Metadata_Total <- bCT_Metadata %>% 
+  mutate(Sample = as.character(Sample)) %>% 
+  select(Sample, BMI, Weight, Height, Gender) %>%
+  inner_join(Metadata_Indexes, by = "Sample") %>% 
+  inner_join(bCT_Biochemical, by = "Sample")
+
+## Join the Biochemical data with the OTU data by Sample and keep only the numeric columns ##
+OTU_Stats_Total <- OTU_table_t %>% 
+  select(Sample, OTU_Order$OTU) %>%
+  inner_join(Stats_Metadata_Total, by = "Sample") %>% 
+  select(-c(Weight, Height, Shannon, Simpson, Inverse_Simpson, Pielou))
+
+OTU_Stats_Total_numeric <- OTU_Stats_Total[sapply(OTU_Stats_Total, is.numeric)]
+
+## Check for normality ##
+OTU_Stats_Total[sapply(OTU_Stats_Total, is.numeric)] %>% 
+  apply(., 2, shapiro.test) %>% 
+  map_dbl("p.value") %>%
+  .[. > 0.05]
+
+## Calculate the correlations, remove the duplicate comparisons to create a triangular plot and convert the matrix to a dataframe for easier visualisation ##
+OTU_Stats_Bioc_Correlation_Spearman <- cor(OTU_Stats_Total_numeric, method = "spearman")
+OTU_Stats_Bioc_Correlation_Spearman[upper.tri(OTU_Stats_Bioc_Correlation_Spearman)] <- NA
+OTU_Stats_Bioc_Correlation_Spearman <- melt(OTU_Stats_Bioc_Correlation_Spearman)
+
+OTU_Stats_Bioc_Correlation_Kendall <- cor(OTU_Stats_Total_numeric, method = "kendall")
+OTU_Stats_Bioc_Correlation_Kendall[upper.tri(OTU_Stats_Bioc_Correlation_Kendall)] <- NA
+OTU_Stats_Bioc_Correlation_Kendall <- melt(OTU_Stats_Bioc_Correlation_Kendall)
+
+## Visualise both the OTUs and the Biochemical associations ##
+OTU_Stats_Bioc_Correlation_Spearman_plot <- OTU_Stats_Bioc_Correlation_Spearman %>%
+  mutate(Var1 = coalesce(OTU_Median_Rel$Family[match(.$Var1, OTU_Median_Rel$OTU)], Var1)) %>% 
+  mutate(Var2 = coalesce(OTU_Median_Rel$Family[match(.$Var2, OTU_Median_Rel$OTU)], Var2)) %>% 
+  mutate(Var1 = factor(Var1, levels = unique(Var1))) %>%
+  mutate(Var2 = factor(Var2, levels = unique(Var2))) %>% 
+  ggplot(data = ., aes(x = Var1, y = Var2, fill = value)) + 
+  geom_tile() +
+  scale_fill_gradient2(low = "deeppink", high = "mediumspringgreen", mid = "dodgerblue3", 
+                       midpoint = 0, limit = c(-1,1), space = "Lab", 
+                       name="Correlation", na.value = "white") +
+  theme_minimal() + 
+  ggtitle("Spearman Correlation Matrix") +
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.text.x = element_markdown(angle = 55, hjust = 1, vjust = 1, size = 7),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.y = element_markdown(size = 7)) +
+  coord_fixed()
+
+OTU_Stats_Bioc_Correlation_Kendall_plot <- OTU_Stats_Bioc_Correlation_Kendall %>%
+  mutate(Var1 = coalesce(OTU_Median_Rel$Family[match(.$Var1, OTU_Median_Rel$OTU)], Var1)) %>% 
+  mutate(Var2 = coalesce(OTU_Median_Rel$Family[match(.$Var2, OTU_Median_Rel$OTU)], Var2)) %>% 
+  mutate(Var1 = factor(Var1, levels = unique(Var1))) %>%
+  mutate(Var2 = factor(Var2, levels = unique(Var2))) %>% 
+  ggplot(data = ., aes(x = Var1, y = Var2, fill = value)) + 
+  geom_tile() +
+  scale_fill_gradient2(low = "deeppink", high = "mediumspringgreen", mid = "dodgerblue3", 
+                       midpoint = 0, limit = c(-1,1), space = "Lab", 
+                       name="Correlation", na.value = "white") +
+  theme_minimal() + 
+  ggtitle("Kendall Correlation Matrix") +
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.text.x = element_markdown(angle = 55, hjust = 1, vjust = 1, size = 7),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.y = element_markdown(size = 7)) +
+  coord_fixed()
+
+OTU_Stats_Bioc_Correlation_Spearman_plot
+OTU_Stats_Bioc_Correlation_Kendall_plot
+```
+
+Check for correlation of the Alpha Diversity statistics compared to other factors like bodyweight
+```{r Association Matrix - Alpha Indexes - Body Metrics - Biochemical}
+Stats_numeric <- Stats_Metadata_Total[sapply(Stats_Metadata_Total, is.numeric)]
+
+## Check for normality ##
+Stats_Metadata_Total[sapply(Stats_Metadata_Total, is.numeric)] %>% 
+  apply(., 2, shapiro.test) %>% 
+  map_dbl("p.value") 
+
+## Calculate the correlations, remove the duplicate comparisons to create a triangular plot and convert the matrix to a dataframe for easier visualisation ##
+Stats_Correlation_Spearman <- cor(Stats_numeric, method = "spearman")
+Stats_Correlation_Spearman[upper.tri(Stats_Correlation_Spearman)] <- NA
+Stats_Correlation_Spearman <- melt(Stats_Correlation_Spearman)
+
+Stats_Correlation_Kendall <- cor(Stats_numeric, method = "kendall")
+Stats_Correlation_Kendall[upper.tri(Stats_Correlation_Kendall)] <- NA
+Stats_Correlation_Kendall <- melt(Stats_Correlation_Kendall)
+
+## Visualise the correlations ##
+Stats_Correlation_Spearman_plot <- ggplot(data = Stats_Correlation_Spearman, aes(x = Var1, y = Var2, fill = value)) + 
+  geom_tile() +
+  scale_fill_gradient2(low = "deeppink", high = "mediumspringgreen", mid = "dodgerblue3", 
+                       midpoint = 0, limit = c(-1,1), space = "Lab", 
+                       name="Correlation",
+                       na.value = "white") +
+  theme_minimal() + 
+  ggtitle("Spearman Correlation Matrix") +
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1), 
+        axis.title.x = element_blank(), 
+        axis.title.y = element_blank()) +
+  coord_fixed()
+
+Stats_Correlation_Kendall_plot <- ggplot(data = Stats_Correlation_Kendall, aes(x = Var1, y = Var2, fill = value)) + 
+  geom_tile() +
+  scale_fill_gradient2(low = "deeppink", high = "mediumspringgreen", mid = "dodgerblue3", 
+                       midpoint = 0, limit = c(-1,1), space = "Lab", 
+                       name="Correlation",
+                       na.value = "white") + 
+  theme_minimal() + 
+  ggtitle("Kendall Correlation Matrix") +
+  theme(plot.title = element_text(hjust = 0.5),
+        axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1), 
+        axis.title.x = element_blank(), 
+        axis.title.y = element_blank()) +
+  coord_fixed()
+
+Stats_Correlation_Spearman_plot
+Stats_Correlation_Kendall_plot
+```
+
+Linear model for the Alpha Indexes and the Stats
+```{r Linear Models - Alpha indexes }
+Stats_numeric_log <- log(Stats_numeric)
+
+Stats_cols <- Stats_Metadata_Total[sapply(Stats_Metadata_Total, is.numeric)] %>%
+  colnames(.)
+
+Stats_lm <- list()
+Stats_lm_plots <- list()
+
+for(i in seq_along(Stats_cols)) {     ## Check every variable in the Stats df ##
+  for(j in seq_along(Stats_cols)) {
+    if(i != j) {                      ## Skip checks between the same columns ##
+      ## Create the linear model for each pair ##
+      model_log <- lm(Stats_numeric_log[[Stats_cols[i]]] ~ Stats_numeric_log[[Stats_cols[j]]]) 
+      ## Save the linear model in the same list you stored the correlations ## 
+      Stats_lm[[paste(Stats_cols[i], "vs", Stats_cols[j])]] <- model_log
+      
+      lm_plot <- ggplot(Stats_numeric_log, aes_string(x = Stats_cols[j], y = Stats_cols[i])) + 
+        geom_point() + 
+        geom_smooth(method = lm, se = FALSE, color = "red") 
+      
+      ## Save all the plots in a new list ## 
+      Stats_lm_plots[[paste(Stats_cols[i], "vs", Stats_cols[j])]] <- lm_plot
+    }
+  }
+}
+
+## Filter for the Comparisons with the highest correlation ##
+Corr_Comp <- Stats_Correlation_Spearman %>%
+  filter(value > 0.3 & value < 0.999) %>% 
+  arrange(desc(value)) %>% 
+  distinct(value, .keep_all = TRUE)
+
+## Visualise based on the high correlation comparisons ##
+for(i in 1:nrow(Corr_Comp)) {
+  plot_title <- paste(Corr_Comp$Var1[i], "vs", Corr_Comp$Var2[i])
+  print(Stats_lm_plots[[plot_title]])
+}
+```
+
+
+Plots statistics based on the Gender
+```{r Gender - Metrics Comparisons}
+## Add the Gender to the 
+Stats_total_FM <- Stats_Metadata_Total %>% 
+  filter(Gender != "U") %>% 
+  mutate(Group_alt = substr(.$Group, 1, 2)) %>% 
+  mutate(Week = substr(.$Group, 3, 4))
+
+## Number of males and females per group ##
+Gender_Numbers <- bCT_Metadata %>%
+  group_by(Gender, Group) %>%
+  mutate(Group = substr(Group, 1, 2),
+         Sample = substr(Sample, 2, 3)) %>%
+  select(Sample, Group, Gender) %>% 
+  distinct() %>% 
+  summarise(Number = n())
+
+## Boxplot comparing Gender and Index ##
+# ggplot(Stats_total_FM, aes(x = Gender, y = Shannon, fill = Gender)) + 
+#   geom_boxplot(color = "black") +
+#   scale_fill_manual(values = c(Pallete[2], Pallete[4])) +
+#   labs(y = "Shannon Index", x = "Gender") + 
+#   facet_wrap(~Group)
+
+## Histogram comparing Indexes by Gender ##
+# ggplot(Stats_total_FM, aes(x = Shannon)) +
+#   geom_histogram() +
+#   facet_wrap(~Gender, scales = "free_x") +
+#   theme(plot.title = element_text(hjust = 0.5)) +
+#   ggtitle("Shannon Index ~ Gender") +
+#   ylab("Frequency")
+
+## Density plot of the same comparison ##
+## This is basically the same as the boxplots just different in visualization. ##
+Density_Gender_Alpha <- Metadata_Indexes %>%
+  mutate(Gender = bCT_Metadata$Gender) %>%
+  pivot_longer(cols = -c(Sample, Gender, Group), names_to = "Index", values_to = "Value") %>%
+  filter(!Gender == "U") %>%
+  ggplot(., aes(x = Value, fill = Gender)) +
+  geom_density(alpha = .5) +
+  scale_fill_manual(values = c(Pallete[2], Pallete[4])) +
+  theme(axis.title.y = element_blank()) +
+  facet_wrap(Index ~ Group, scales = "free")
+
+# ggplot(Stats_total_FM, aes(x = Shannon, fill = Gender)) + 
+#   geom_density(alpha = .5) +
+#   scale_fill_manual(values = c(Pallete[2], Pallete[4])) +
+#   theme(axis.title.y = element_blank()) +
+#   facet_wrap(~Group)
+  
+# ggplot(Stats_total_FM, aes(x = Shannon, fill = Gender)) + 
+#   geom_density(alpha = .5) +
+#   scale_fill_manual(values = c(Pallete[2], Pallete[4])) +
+#   facet_grid(Group_alt ~ Week)
+
+## Bubble plots ##
+Stats_total_FM %>% 
+  mutate(Group_alt = substr(.$Group, 1, 2)) %>% 
+  ggplot(.,
+       aes(x = Shannon, y = BMI, size = length(.$Sample), colour = Group, shape = Gender)) +
+  geom_point(alpha = 0.5) + 
+  scale_colour_manual(values = c(Pallete[1], Pallete[3], Pallete[2], Pallete[5])) +
+  theme_minimal() +
+  labs(x = "Shannon", y = "BMI", size = "Samples", title = "Comparison of Alpha Indexes to the BMI") +
+  facet_grid(Gender ~ Group)
+
+Stats_total_FM %>% 
+  mutate(Group_alt = substr(.$Group, 1, 2)) %>% 
+  ggplot(.,
+       aes(x = Simpson, y = BMI, size = length(.$Sample), colour = Group, shape = Gender)) +
+  geom_point(alpha = 0.5) + 
+  scale_colour_manual(values = c(Pallete[1], Pallete[3], Pallete[2], Pallete[5])) +
+  theme_minimal() +
+  labs(x = "Simpson", y = "BMI", size = "Samples", title = "Comparison of Alpha Indexes to the BMI") +
+  facet_grid(Gender ~ Group)
+
+Stats_total_FM %>% 
+  mutate(Group_alt = substr(.$Group, 1, 2)) %>% 
+  ggplot(.,
+       aes(x = Pielou, y = BMI, size = length(.$Sample), colour = Group, shape = Gender)) +
+  geom_point(alpha = 0.5) + 
+  scale_colour_manual(values = c(Pallete[1], Pallete[3], Pallete[2], Pallete[5])) +
+  theme_minimal() +
+  labs(x = "Pielou", y = "BMI", size = "Samples", title = "Comparison of Alpha Indexes to the BMI") +
+  facet_grid(Gender ~ Group)
+
+Density_Gender_Alpha
+```
+
+```{r RDA Analysis - Main Metrics}
+Stats <- Stats_Metadata_Total %>%
+  select(-c(Height, Weight, Inverse_Simpson))
+
+BC_DF_2 <- as.data.frame(as.matrix(BC_Distances))
+
+DB_RDA_Result <- capscale(BC_DF_2 ~ ., data = Stats)
+
+# plot(DB_RDA_Result)
+
+plot1 <- ordiplot(DB_RDA_Result, choices=c(1, 2))
+
+attach(Stats)
+sites1 <- sites.long(plot1, env.data = Stats)
+axis1 <- axis.long(DB_RDA_Result, choices=c(1, 2))
+centroids.Subpop1 <- centroids.long(sites1, grouping = Gender, centroids.only = TRUE)
+centroids.Subpop2 <- centroids.long(sites1, grouping = Gender, centroids.only = FALSE)
+centroids.Pop1 <- centroids.long(sites1, grouping = Group, centroids.only = TRUE)
+centroids.Pop2 <- centroids.long(sites1, grouping = Group, centroids.only = FALSE)
+
+envfit_result <- envfit(DB_RDA_Result, Stats)
+vectors <- scores(envfit_result, "vectors")
+
+RDA_plot <- ggplot() +
+    geom_vline(xintercept = c(0), color = "grey70", linetype = 2) +
+    geom_hline(yintercept = c(0), color = "grey70", linetype = 2) +  
+    xlab(axis1[1, "label"]) +
+    ylab(axis1[2, "label"]) +  
+    scale_x_continuous(sec.axis = dup_axis(labels = NULL, name = NULL)) +
+    scale_y_continuous(sec.axis = dup_axis(labels = NULL, name = NULL)) +
+    geom_mark_hull(data = sites1, 
+                   aes(x = axis1, y = axis2, colour = Group, 
+                       fill = after_scale(alpha(colour, 0.2)),
+                       label = Group), 
+                   concavity = 4, size = 1, expand = unit(0.5, "mm"),
+                   show.legend = FALSE, con.cap = 0, label.fill = alpha(Pallete, alpha = 0), 
+                   con.size = 0.8, con.linetype = "dashed" ) +
+    # geom_segment(data = centroids.Pop2,
+    #              aes(x = axis1c, y = axis2c, xend = axis1, yend = axis2, colour = Group),
+    #              size = 0.4, show.legend = FALSE) +
+    geom_segment(data = vectors, aes(x = 0, y = 0, xend = CAP1, yend = CAP2), 
+                 arrow = arrow(length = unit(0.2, "cm")), colour = "black") +
+    geom_point(data = sites1, 
+               aes(x = axis1, y = axis2, colour = Group, 
+                   # shape = Gender
+                   ), 
+               alpha = 0.7, size = 2) + 
+    geom_point(data = centroids.Pop1, 
+               aes(x = axis1c, y = axis2c, colour = Group), 
+               size = 4, shape = 21, stroke = 1, colour = "black", fill = Pallete[-3]) + 
+  scale_colour_manual(values = Pallete[-3]) +
+  labs(title = "CCA Analysis using Bray Curtis distances from OTU abundancy data",
+        subtitle = "Comparisons made: BMI, Alpha Diversity Indexes and Biochemical data") +
+    ggrepel::geom_text_repel(data = vectors, aes(x = CAP1, y = CAP2, label = rownames(vectors)), vjust = 1, hjust = 0.5 ) 
+
+RDA_plot
+```
+
+```{r PCA & Hierarchical Clustering}
+library(factoextra)
+library(FactoMineR)
+
+# new_OTU <- OTU_table_t %>% 
+#   # select(-Group) %>% 
+#   inner_join(Stats_total_FM, by = "Sample") %>% 
+#   column_to_rownames(var = "Sample") %>% 
+#   select_if(is.numeric) %>% 
+#   mutate(Group = OTU_table_t$Group) %>% 
+#   mutate(Group = as.factor(Group)) %>% 
+#   select(Group, everything())
+
+new_OTU <- OTU_table_t %>% 
+  column_to_rownames(var = "Sample") %>% 
+  mutate(Group = as.factor(Group))
+
+res.pca <- PCA(new_OTU[-1], ncp = 3, graph = FALSE)
+res.hcpc <- HCPC(res.pca, graph = FALSE)
+
+Clusters <- res.hcpc$data.clust %>% 
+  select(clust) %>% 
+  as.data.frame() %>% 
+  rownames_to_column("Sample") %>% 
+  inner_join(Metadata, by = "Sample") %>% 
+  mutate(Group = as.factor(Group)) %>% 
+  mutate(clust = as.factor(paste0("Cluster ", clust)))
+
+Clusters %>%
+group_by(clust) %>%
+  summarise(n = n())
+
+Cluster_Dendrogram <- fviz_dend(res.hcpc, cex = 0.7, palette = c(Pallete[1], Pallete[2], Pallete[4]), rect = TRUE, 
+          rect_fill = TRUE, rect_border = "white", labels_track_height = 0.8)
+
+# fviz_cluster(res.hcpc, repel = TRUE, show.clust.cent = TRUE, 
+#              palette = c(Pallete[2], Pallete[4], Pallete[1]),
+#              ggtheme = theme_minimal(), main = "Factor map")
+
+# res.hcpc$desc.var$quanti
+# res.hcpc$desc.axes$quanti
+# res.hcpc$desc.ind$para
+
+PCA_Contributiion <- fviz_pca_var(res.pca, col.var="contrib") +
+  scale_color_gradient2(low = "deeppink3", mid = "dodgerblue3", high = "mediumspringgreen", midpoint = 4) +
+  theme_bw()
+
+# ## Create the PCA plots and join them with the grid arrange function ##
+# p1 <- fviz_pca_ind(res.pca, label = "none",
+#              habillage = Clusters$Group, title = "PCA - Individuals - Groups",
+#              palette = c(Pallete[1], Pallete[2], Pallete[4], Pallete[5]), 
+#              addEllipses = TRUE, ellipse.level = 0.8)
+# p2 <- fviz_pca_ind(res.pca, label = "none", title = "PCA - Individuals - Hierarchical Clusters",
+#              habillage = Clusters$clust, 
+#              palette = c(Pallete[2], Pallete[4], Pallete[1]), 
+#              addEllipses = TRUE, ellipse.level = 0.8)
+# 
+# grid.arrange(p1, p2, nrow = 2)
+
+# Clusters %>%
+# group_by(Group, clust) %>%
+#   summarise(n = n()) %>%
+#   mutate(percentage = n / sum(n) * 100) %>% 
+#   ggplot(., aes(x = Group, y = percentage, fill = clust)) +
+#   geom_bar(stat = "identity", width = 1) +
+#   scale_fill_manual(values = c(Pallete[2], Pallete[4], Pallete[1])) +  
+#   ggtitle("Percentage of Clusters for each Group") + 
+#   theme(axis.title.x = element_blank()) +
+#   labs(fill = "Cluster") +
+#   ylab("Percentage")
+
+Cluster_Percentages <- Clusters %>%
+group_by(Group, clust) %>%
+  summarise(n = n()) %>%
+  mutate(percentage = n / sum(n) * 100) %>% 
+  ggplot(., aes(x = Group, y = percentage, fill = clust)) +
+  geom_bar(stat = "identity", width = 1) +
+  scale_fill_manual(values = c(Pallete[2], Pallete[4], Pallete[1])) +  
+  ggtitle("Percentage of Clusters for each Group") + 
+  facet_wrap(~Group, nrow = 1, scales = "free_x") +
+  theme(axis.title.x = element_blank()) +
+  labs(fill = "Cluster") +
+  ylab("Percentage")
+
+Clusters <- res.pca$ind$coord %>%
+  as.data.frame() %>% 
+  rownames_to_column(var = "Sample") %>% 
+  inner_join(Clusters, by = "Sample") %>%
+  mutate(Group_alt = substr(.$Group, 1, 2))
+
+eig1 <- round(res.pca$eig[1, 3], 2)
+eig2 <- round(res.pca$eig[2, 3] - eig1, 2)
+
+Centroids <- Clusters %>%
+  group_by(Group, Group_alt) %>%
+  summarise(Dim.1 = mean(Dim.1, na.rm = TRUE),
+            Dim.2 = mean(Dim.2, na.rm = TRUE)) %>% 
+  ungroup()
+
+# Create the PCA plot
+Groups_alt_clust_PCA <- ggplot(Clusters, aes(x = Dim.1, y = Dim.2, color = Group_alt, shape = clust)) +
+  geom_point() +
+  scale_colour_manual(values = c(Pallete[2], Pallete[5])) +
+  stat_ellipse(aes(group = Group_alt), level = 0.8, show.legend = FALSE) +
+  stat_ellipse(aes(group = clust), geom = "polygon", alpha = 0.3, level = 0.8, show.legend = FALSE) +
+  labs(x = paste0("Dimension 1 (", eig1, "%)"), 
+       y = paste0("Dimension 2 (", eig2, "%)"), 
+       color = "Group", 
+       shape = "Cluster", 
+       title = "PCA plot ~ Main groups and Clusters") +
+  theme_minimal() + 
+  geom_point(data = Centroids, aes(x = Dim.1, y = Dim.2), size = 8, shape = 20)
+
+Groups_clust_PCA <- ggplot(Clusters, aes(x = Dim.1, y = Dim.2, color = Group, shape = clust)) +
+  geom_point() +
+  scale_colour_manual(values = c(Pallete[1], Pallete[2], Pallete[4], Pallete[5])) +
+  stat_ellipse(aes(group = Group), level = 0.8, show.legend = FALSE) +
+  stat_ellipse(aes(group = clust), geom = "polygon", alpha = 0.3, level = 0.8, show.legend = FALSE) +
+  labs(x = paste0("Dimension 1 (", eig1, "%)"), 
+       y = paste0("Dimension 2 (", eig2, "%)"), 
+       color = "Group", 
+       shape = "Cluster", 
+       title = "PCA plot ~ Groups and Clusters") +
+  theme_minimal() + 
+  geom_point(data = Centroids, aes(x = Dim.1, y = Dim.2), size = 8, shape = 20)
+
+Cluster_Dendrogram
+plot(res.hcpc, choice = "3D.map", palette = "")
+PCA_Contributiion
+Cluster_Percentages
+Groups_alt_clust_PCA
+Groups_clust_PCA
+
+```
+
+```{r Plots total}
+## RA plots, Family ##
+RA_Fam_Samples_Plot
+RA_Fam_Groups_Plot
+RA_Un_Fam_Plot
+RA_Fam_alt_Plot
+
+## RA plots, Phylum ##
+RA_Phy_Samples_Plot
+RA_Phy_Groups_Plot
+RA_Phy_alt_Plot
+
+## F2B ##
+F2B_Pie_PB
+F2B_Pie_LC
+F2B_Ratio_Boxplots
+F2B_Boxplots
+
+## Families - Significance ##
+Families_p_values
+# Families_Sign_Plot
+
+## Phyla - Significance ##
+Phyla_p_values
+# Phyla_Sign_Plot
+
+## Alpha Indexes ##
+Alpha_Distribution_Histograms
+Alpha_Div_Barplots
+Alpha_Div_Boxplots
+
+## Beta Diversity Plots ##
+PCoA_LC
+PCoA_PB
+NMDS_LC
+NMDS_PB
+Heatmap_BC
+Heatmap_BC_Groups
+
+## Ascociation plots - OTU - Biochemicals ##
+OTU_Stats_Bioc_Correlation_Spearman_plot
+OTU_Stats_Bioc_Correlation_Kendall_plot
+
+## Ascociation plots - Metadata - Biochemicals ##
+Stats_Correlation_Spearman_plot
+Stats_Correlation_Kendall_plot
+
+## Gender stuff ##
+Density_Gender_Alpha
+
+## RDA analysis ##
+RDA_plot
+
+## PCA and Hierarchical Clustering ##
+Cluster_Dendrogram
+plot(res.hcpc, choice = "3D.map", palette = "")
+PCA_Contributiion
+Cluster_Percentages
+Groups_alt_clust_PCA
+Groups_clust_PCA
+
+```
+
+
+These are the commands to save your plots in a specified folder. Take note of the dimensions, so they will not disfigure your figures.
+```{r Save 'm}
+## RA plots, Family ##
+# ggsave("Plottin_2/RA_Family_Samples_Plot.png", plot = RA_Fam_Samples_Plot, width = 12, height = 8, dpi = 600)
+# ggsave("Plottin_2/RA_Family_Groups_Plot.png", plot = RA_Fam_Groups_Plot, width = 12, height = 8, dpi = 600)
+# ggsave("Plottin_2/RA_Unk_Family_Samples_Plot.png", plot = RA_Un_Fam_Plot, width = 12, height = 8, dpi = 600)
+# ggsave("Plottin_2/RA_Family_Groups_alt_Plot.png", plot = RA_Fam_alt_Plot, width = 12, height = 8, dpi = 600)
+
+## RA plots, Phylum ##
+# ggsave("Plottin_2/RA_Phyla_Samples_Plot.png", plot = RA_Phy_Samples_Plot, width = 12, height = 8, dpi = 600)
+# ggsave("Plottin_2/RA_Phyla_Groups_Plot.png", plot = RA_Phy_Groups_Plot, width = 12, height = 8, dpi = 600)
+# ggsave("Plottin_2/RA_Phyla_Groups_alt_Plot.png", plot = RA_Phy_alt_Plot, width = 12, height = 8, dpi = 600)
+
+## F2B ##
+# ggsave("Plottin_2/F2B_Pie_PB.png", plot = F2B_Pie_PB, width = 10, height = 8, dpi = 600)
+# ggsave("Plottin_2/F2B_Pie_LC.png", plot = F2B_Pie_LC, width = 10, height = 8, dpi = 600)
+# ggsave("Plottin_2/F2B_Ratio_Boxplots.png", plot = F2B_Ratio_Boxplots, width = 12, height = 8, dpi = 600)
+# ggsave("Plottin_2/FB_Boxplots.png", plot = F2B_Boxplots, width = 12, height = 8, dpi = 600)
+
+## Families - Significance ##
+# ggsave("Plottin_2/Families_Significance.png", plot = Families_p_values, width = 12, height = 8, dpi = 600)
+# # ggsave("Plottin_2/Sign_Fams_Plot.png", plot = Families_Sign_Plot, width = 12, height = 8, dpi = 600)
+
+## Phyla - Significance ##
+# ggsave("Plottin_2/Phyla_Significance.png", plot = Phyla_p_values, width = 12, height = 8, dpi = 600)
+# # ggsave("Plottin_2/Sign_Phy_Plot.png", plot = Phyla_Sign_Plot, width = 12, height = 8, dpi = 600)
+
+## Alpha Indexes ##
+# ggsave("Plottin_2/Alpha_Histograms.png", plot = Alpha_Distribution_Histograms, width = 12, height = 8, dpi = 600)
+# ggsave("Plottin_2/Alpha_Div_Barplots.png", plot = Alpha_Div_Barplots, width = 12, height = 8, dpi = 600)
+# ggsave("Plottin_2/Alpha_Div_Boxplots.png", plot = Alpha_Div_Boxplots, width = 12, height = 8, dpi = 600)
+
+## Beta Diversity Plots ##
+# ggsave("Plottin_2/PCoA_LC.png", plot = PCoA_LC, width = 12, height = 8, dpi = 600)
+# ggsave("Plottin_2/PCoA_PB.png", plot = PCoA_PB, width = 12, height = 8, dpi = 600)
+# ggsave("Plottin_2/NMDS_LC.png", plot = NMDS_LC, width = 12, height = 8, dpi = 600)
+# ggsave("Plottin_2/NMDS_PB.png", plot = NMDS_PB, width = 12, height = 8, dpi = 600)
+# ggsave("Plottin_2/Heatmap_BC.png", plot = Heatmap_BC, width = 12, height = 8, dpi = 600)
+# ggsave("Plottin_2/Heatmap_BC_Groups.png", plot = Heatmap_BC_Groups, width = 12, height = 8, dpi = 600)
+
+## Ascociation plots - OTU - Biochemicals ##
+# ggsave("Plottin_2/OTU_Bioc_Spearman.png", plot = OTU_Stats_Bioc_Correlation_Spearman_plot, width = 12, height = 8, dpi = 600)
+# ggsave("Plottin_2/OTU_Bioc_Kendall.png", plot = OTU_Stats_Bioc_Correlation_Kendall_plot, width = 12, height = 8, dpi = 600)
+
+## Ascociation plots - Metadata - Biochemicals ##
+# ggsave("Plottin_2/Stats_Correlation_Spearman.png", plot = Stats_Correlation_Spearman_plot, width = 12, height = 8, dpi = 600)
+# ggsave("Plottin_2/Stats_Correlation_Kendall.png", plot = Stats_Correlation_Kendall_plot, width = 12, height = 8, dpi = 600)
+
+## Gender stuff ##
+# ggsave("Plottin_2/Density_Gender_Alpha.png", plot = Density_Gender_Alpha, width = 12, height = 8, dpi = 600)
+
+## RDA analysis ##
+# ggsave("Plottin_2/RDA_plot.png", plot = RDA_plot, width = 12, height = 8, dpi = 600)
+
+## PCA and Hierarchical Clustering ##
+# ggsave("Plottin_2/Cluster_Dendrogram.png", plot = Cluster_Dendrogram, width = 12, height = 8, dpi = 600)
+# ggsave("Plottin_2/3D_Dendogram.png", plot = plot(res.hcpc, choice = "3D.map", palette = ""), width = 12, height = 8, dpi = 600)
+# ggsave("Plottin_2/Cluster_Percentages.png", plot = Cluster_Percentages, width = 12, height = 8, dpi = 600)
+# # ggsave("Plottin_2/Groups_alt_clust_PCA.png", plot = Groups_alt_clust_PCA, width = 12, height = 8, dpi = 600)
+# ggsave("Plottin_2/Groups_clust_PCA.png", plot = Groups_clust_PCA, width = 12, height = 8, dpi = 600)
+
+
+```
+
+
+
+```{r Stylise the dataframes to be added to the supplamentary material}
+library(knitr)
+library(kableExtra)
+
+
+Gender_Numbers_plot <- kable(Gender_Numbers, format = "html") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = TRUE) %>%
+  row_spec(0, bold = TRUE, color = "grey10", background = "darkcyan") %>%
+  column_spec(1, bold = TRUE, color = "darkcyan") %>%
+  column_spec(2, bold = TRUE, color = "darkcyan") %>% 
+  column_spec(3, bold = TRUE, color = "black")
+
+Gender_Numbers_plot
+```
+
+
